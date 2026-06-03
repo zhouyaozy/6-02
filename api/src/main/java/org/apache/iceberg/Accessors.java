@@ -18,6 +18,9 @@
  */
 package org.apache.iceberg;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
@@ -59,11 +62,13 @@ public class Accessors {
     private final int position;
     private final Type type;
     private final Class<?> javaClass;
+    private final List<Integer> positions;
 
     PositionAccessor(int pos, Type type) {
       this.position = pos;
       this.type = type;
       this.javaClass = type.typeId().javaClass();
+      this.positions = Collections.singletonList(pos);
     }
 
     @Override
@@ -85,6 +90,11 @@ public class Accessors {
     }
 
     @Override
+    public List<Integer> positions() {
+      return positions;
+    }
+
+    @Override
     public String toString() {
       return "Accessor(positions=[" + position + "], type=" + type + ")";
     }
@@ -95,12 +105,14 @@ public class Accessors {
     private final int p1;
     private final Type type;
     private final Class<?> javaClass;
+    private final List<Integer> positions;
 
     Position2Accessor(int pos, PositionAccessor wrapped) {
       this.p0 = pos;
       this.p1 = wrapped.position();
       this.type = wrapped.type();
       this.javaClass = wrapped.javaClass();
+      this.positions = Arrays.asList(p0, p1);
     }
 
     @Override
@@ -118,6 +130,11 @@ public class Accessors {
     }
 
     @Override
+    public List<Integer> positions() {
+      return positions;
+    }
+
+    @Override
     public String toString() {
       return "Accessor(positions=[" + p0 + ", " + p1 + "], type=" + type + ")";
     }
@@ -129,6 +146,7 @@ public class Accessors {
     private final int p2;
     private final Type type;
     private final Class<?> javaClass;
+    private final List<Integer> positions;
 
     Position3Accessor(int pos, Position2Accessor wrapped) {
       this.p0 = pos;
@@ -136,6 +154,7 @@ public class Accessors {
       this.p2 = wrapped.p1;
       this.type = wrapped.type();
       this.javaClass = wrapped.javaClass();
+      this.positions = Arrays.asList(p0, p1, p2);
     }
 
     @Override
@@ -149,6 +168,11 @@ public class Accessors {
     }
 
     @Override
+    public List<Integer> positions() {
+      return positions;
+    }
+
+    @Override
     public String toString() {
       return "Accessor(positions=[" + p0 + ", " + p1 + ", " + p2 + "], type=" + type + ")";
     }
@@ -157,10 +181,20 @@ public class Accessors {
   private static class WrappedPositionAccessor implements Accessor<StructLike> {
     private final int position;
     private final Accessor<StructLike> accessor;
+    private final List<Integer> positions;
 
     WrappedPositionAccessor(int pos, Accessor<StructLike> accessor) {
       this.position = pos;
       this.accessor = accessor;
+      List<Integer> wrappedPositions = accessor.positions();
+      if (wrappedPositions != null) {
+        List<Integer> result = new ArrayList<>();
+        result.add(pos);
+        result.addAll(wrappedPositions);
+        this.positions = Collections.unmodifiableList(result);
+      } else {
+        this.positions = Collections.singletonList(pos);
+      }
     }
 
     @Override
@@ -175,6 +209,11 @@ public class Accessors {
     @Override
     public Type type() {
       return accessor.type();
+    }
+
+    @Override
+    public List<Integer> positions() {
+      return positions;
     }
 
     @Override

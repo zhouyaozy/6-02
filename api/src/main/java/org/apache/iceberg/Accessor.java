@@ -19,10 +19,15 @@
 package org.apache.iceberg;
 
 import java.io.Serializable;
+import java.util.List;
 import org.apache.iceberg.types.Type;
 
 public interface Accessor<T> extends Serializable {
   Object get(T container);
 
   Type type();
+
+  default List<Integer> positions() {
+    return null;
+  }
 }
