@@ -19,10 +19,44 @@
 package org.apache.iceberg;
 
 import java.io.Serializable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import org.apache.iceberg.types.Type;
 
 public interface Accessor<T> extends Serializable {
   Object get(T container);
 
   Type type();
+
+  default Accessor<T> cached() {
+    return new CachingAccessor<>(this);
+  }
+
+  final class CachingAccessor<T> implements Accessor<T> {
+    private final Accessor<T> delegate;
+    private final ConcurrentMap<T, Object> cache = new ConcurrentHashMap<>();
+
+    CachingAccessor(Accessor<T> delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    public Object get(T container) {
+      return cache.computeIfAbsent(container, delegate::get);
+    }
+
+    @Override
+    public Type type() {
+      return delegate.type();
+    }
+
+    public void clear() {
+      cache.clear();
+    }
+
+    @Override
+    public String toString() {
+      return "CachingAccessor(wrapped=" + delegate + ")";
+    }
+  }
 }
