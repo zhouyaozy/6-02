@@ -1,0 +1,219 @@
+diff --git a/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMock.java b/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMock.java
+index 7894c1857..fc7303072 100644
+--- a/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMock.java
++++ b/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMock.java
+@@ -39,28 +39,33 @@ import org.apache.iceberg.relocated.com.google.common.io.ByteStreams;
+ 
+ public class AliyunOSSMock {
+ 
+-  static final String PROP_ROOT_DIR = "root-dir";
+-  static final String ROOT_DIR_DEFAULT = "/tmp";
+-
+-  static final String PROP_HTTP_PORT = "server.port";
+-  static final int PORT_HTTP_PORT_DEFAULT = 9393;
+-
++  private final AliyunOSSMockProperties mockProperties;
+   private final AliyunOSSMockLocalStore localStore;
+   private final HttpServer httpServer;
+ 
+-  public static AliyunOSSMock start(Map<String, Object> properties) throws IOException {
+-    AliyunOSSMock mock =
+-        new AliyunOSSMock(
+-            properties.getOrDefault(PROP_ROOT_DIR, ROOT_DIR_DEFAULT).toString(),
+-            Integer.parseInt(
+-                properties.getOrDefault(PROP_HTTP_PORT, PORT_HTTP_PORT_DEFAULT).toString()));
++  public static AliyunOSSMock start(Map<String, String> properties) throws IOException {
++    AliyunOSSMockProperties mockProperties = new AliyunOSSMockProperties(properties);
++    AliyunOSSMock mock = new AliyunOSSMock(mockProperties);
++    mock.start();
++    return mock;
++  }
++
++  static AliyunOSSMock start(AliyunOSSMockProperties mockProperties) throws IOException {
++    AliyunOSSMock mock = new AliyunOSSMock(mockProperties);
+     mock.start();
+     return mock;
+   }
+ 
+-  private AliyunOSSMock(String rootDir, int serverPort) throws IOException {
+-    localStore = new AliyunOSSMockLocalStore(rootDir);
+-    httpServer = HttpServer.create(new InetSocketAddress("localhost", serverPort), 0);
++  private AliyunOSSMock(AliyunOSSMockProperties mockProperties) throws IOException {
++    this.mockProperties = mockProperties;
++    this.localStore = new AliyunOSSMockLocalStore(mockProperties.rootDir());
++    this.httpServer =
++        HttpServer.create(
++            new InetSocketAddress(mockProperties.host(), mockProperties.httpPort()), 0);
++  }
++
++  AliyunOSSMockProperties mockProperties() {
++    return mockProperties;
+   }
+ 
+   private void start() {
+diff --git a/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMockExtension.java b/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMockExtension.java
+index d4cb10615..3554fb6be 100644
+--- a/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMockExtension.java
++++ b/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMockExtension.java
+@@ -32,12 +32,12 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+ 
+ public class AliyunOSSMockExtension implements AliyunOSSExtension {
+ 
+-  private final Map<String, Object> properties;
++  private final AliyunOSSMockProperties mockProperties;
+ 
+   private AliyunOSSMock ossMock;
+ 
+-  private AliyunOSSMockExtension(Map<String, Object> properties) {
+-    this.properties = properties;
++  private AliyunOSSMockExtension(AliyunOSSMockProperties mockProperties) {
++    this.mockProperties = mockProperties;
+   }
+ 
+   public static Builder builder() {
+@@ -52,7 +52,7 @@ public class AliyunOSSMockExtension implements AliyunOSSExtension {
+   @Override
+   public void start() {
+     try {
+-      ossMock = AliyunOSSMock.start(properties);
++      ossMock = AliyunOSSMock.start(mockProperties);
+     } catch (Exception e) {
+       throw new RuntimeException("Can't start OSS Mock");
+     }
+@@ -66,17 +66,14 @@ public class AliyunOSSMockExtension implements AliyunOSSExtension {
+   @Override
+   public OSS createOSSClient() {
+     String endpoint =
+-        String.format(
+-            "http://localhost:%s",
+-            properties.getOrDefault(
+-                AliyunOSSMock.PROP_HTTP_PORT, AliyunOSSMock.PORT_HTTP_PORT_DEFAULT));
++        String.format("http://%s:%d", mockProperties.host(), mockProperties.httpPort());
+     return new OSSClientBuilder().build(endpoint, "foo", "bar");
+   }
+ 
+   private File rootDir() {
+-    Object rootDir = properties.get(AliyunOSSMock.PROP_ROOT_DIR);
++    String rootDir = mockProperties.rootDir();
+     Preconditions.checkNotNull(rootDir, "Root directory cannot be null");
+-    return new File(rootDir.toString());
++    return new File(rootDir);
+   }
+ 
+   @Override
+@@ -105,22 +102,37 @@ public class AliyunOSSMockExtension implements AliyunOSSExtension {
+   }
+ 
+   public static class Builder {
+-    private final Map<String, Object> props = Maps.newHashMap();
++    private final Map<String, String> props = Maps.newHashMap();
++
++    public Builder rootDir(String rootDir) {
++      props.put(AliyunOSSMockProperties.OSS_MOCK_ROOT_DIR, rootDir);
++      return this;
++    }
++
++    public Builder httpPort(int port) {
++      props.put(AliyunOSSMockProperties.OSS_MOCK_HTTP_PORT, String.valueOf(port));
++      return this;
++    }
++
++    public Builder host(String host) {
++      props.put(AliyunOSSMockProperties.OSS_MOCK_HOST, host);
++      return this;
++    }
+ 
+     public AliyunOSSExtension build() {
+-      String rootDir = (String) props.get(AliyunOSSMock.PROP_ROOT_DIR);
++      String rootDir = props.get(AliyunOSSMockProperties.OSS_MOCK_ROOT_DIR);
+       if (Strings.isNullOrEmpty(rootDir)) {
+         File dir =
+             new File(
+                 System.getProperty("java.io.tmpdir"),
+                 "oss-mock-file-store-" + System.currentTimeMillis());
+         rootDir = dir.getAbsolutePath();
+-        props.put(AliyunOSSMock.PROP_ROOT_DIR, rootDir);
++        props.put(AliyunOSSMockProperties.OSS_MOCK_ROOT_DIR, rootDir);
+       }
+       File root = new File(rootDir);
+       root.deleteOnExit();
+       root.mkdir();
+-      return new AliyunOSSMockExtension(props);
++      return new AliyunOSSMockExtension(new AliyunOSSMockProperties(props));
+     }
+   }
+ }
+diff --git a/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMockProperties.java b/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMockProperties.java
+new file mode 100644
+index 000000000..a2d941e2b
+--- /dev/null
++++ b/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMockProperties.java
+@@ -0,0 +1,68 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.iceberg.aliyun.oss.mock;
++
++import java.io.Serializable;
++import java.util.Map;
++import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
++import org.apache.iceberg.util.PropertyUtil;
++
++public class AliyunOSSMockProperties implements Serializable {
++
++  public static final String OSS_MOCK_ROOT_DIR = "oss-mock.root-dir";
++  public static final String OSS_MOCK_ROOT_DIR_DEFAULT = "/tmp";
++
++  public static final String OSS_MOCK_HTTP_PORT = "oss-mock.http-port";
++  public static final int OSS_MOCK_HTTP_PORT_DEFAULT = 9393;
++
++  public static final String OSS_MOCK_HOST = "oss-mock.host";
++  public static final String OSS_MOCK_HOST_DEFAULT = "localhost";
++
++  private final String rootDir;
++  private final int httpPort;
++  private final String host;
++
++  public AliyunOSSMockProperties() {
++    this(ImmutableMap.of());
++  }
++
++  public AliyunOSSMockProperties(Map<String, String> properties) {
++    this.rootDir =
++        PropertyUtil.propertyAsString(
++            properties, OSS_MOCK_ROOT_DIR, OSS_MOCK_ROOT_DIR_DEFAULT);
++    this.httpPort =
++        PropertyUtil.propertyAsInt(
++            properties, OSS_MOCK_HTTP_PORT, OSS_MOCK_HTTP_PORT_DEFAULT);
++    this.host =
++        PropertyUtil.propertyAsString(
++            properties, OSS_MOCK_HOST, OSS_MOCK_HOST_DEFAULT);
++  }
++
++  public String rootDir() {
++    return rootDir;
++  }
++
++  public int httpPort() {
++    return httpPort;
++  }
++
++  public String host() {
++    return host;
++  }
++}

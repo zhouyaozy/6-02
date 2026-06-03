@@ -32,12 +32,12 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 
 public class AliyunOSSMockExtension implements AliyunOSSExtension {
 
-  private final Map<String, Object> properties;
+  private final AliyunOSSMockProperties mockProperties;
 
   private AliyunOSSMock ossMock;
 
-  private AliyunOSSMockExtension(Map<String, Object> properties) {
-    this.properties = properties;
+  private AliyunOSSMockExtension(AliyunOSSMockProperties mockProperties) {
+    this.mockProperties = mockProperties;
   }
 
   public static Builder builder() {
@@ -52,7 +52,7 @@ public class AliyunOSSMockExtension implements AliyunOSSExtension {
   @Override
   public void start() {
     try {
-      ossMock = AliyunOSSMock.start(properties);
+      ossMock = AliyunOSSMock.start(mockProperties);
     } catch (Exception e) {
       throw new RuntimeException("Can't start OSS Mock");
     }
@@ -66,17 +66,14 @@ public class AliyunOSSMockExtension implements AliyunOSSExtension {
   @Override
   public OSS createOSSClient() {
     String endpoint =
-        String.format(
-            "http://localhost:%s",
-            properties.getOrDefault(
-                AliyunOSSMock.PROP_HTTP_PORT, AliyunOSSMock.PORT_HTTP_PORT_DEFAULT));
+        String.format("http://%s:%d", mockProperties.host(), mockProperties.httpPort());
     return new OSSClientBuilder().build(endpoint, "foo", "bar");
   }
 
   private File rootDir() {
-    Object rootDir = properties.get(AliyunOSSMock.PROP_ROOT_DIR);
+    String rootDir = mockProperties.rootDir();
     Preconditions.checkNotNull(rootDir, "Root directory cannot be null");
-    return new File(rootDir.toString());
+    return new File(rootDir);
   }
 
   @Override
@@ -105,22 +102,37 @@ public class AliyunOSSMockExtension implements AliyunOSSExtension {
   }
 
   public static class Builder {
-    private final Map<String, Object> props = Maps.newHashMap();
+    private final Map<String, String> props = Maps.newHashMap();
+
+    public Builder rootDir(String rootDir) {
+      props.put(AliyunOSSMockProperties.OSS_MOCK_ROOT_DIR, rootDir);
+      return this;
+    }
+
+    public Builder httpPort(int port) {
+      props.put(AliyunOSSMockProperties.OSS_MOCK_HTTP_PORT, String.valueOf(port));
+      return this;
+    }
+
+    public Builder host(String host) {
+      props.put(AliyunOSSMockProperties.OSS_MOCK_HOST, host);
+      return this;
+    }
 
     public AliyunOSSExtension build() {
-      String rootDir = (String) props.get(AliyunOSSMock.PROP_ROOT_DIR);
+      String rootDir = props.get(AliyunOSSMockProperties.OSS_MOCK_ROOT_DIR);
       if (Strings.isNullOrEmpty(rootDir)) {
         File dir =
             new File(
                 System.getProperty("java.io.tmpdir"),
                 "oss-mock-file-store-" + System.currentTimeMillis());
         rootDir = dir.getAbsolutePath();
-        props.put(AliyunOSSMock.PROP_ROOT_DIR, rootDir);
+        props.put(AliyunOSSMockProperties.OSS_MOCK_ROOT_DIR, rootDir);
       }
       File root = new File(rootDir);
       root.deleteOnExit();
       root.mkdir();
-      return new AliyunOSSMockExtension(props);
+      return new AliyunOSSMockExtension(new AliyunOSSMockProperties(props));
     }
   }
 }

@@ -39,28 +39,33 @@ import org.apache.iceberg.relocated.com.google.common.io.ByteStreams;
 
 public class AliyunOSSMock {
 
-  static final String PROP_ROOT_DIR = "root-dir";
-  static final String ROOT_DIR_DEFAULT = "/tmp";
-
-  static final String PROP_HTTP_PORT = "server.port";
-  static final int PORT_HTTP_PORT_DEFAULT = 9393;
-
+  private final AliyunOSSMockProperties mockProperties;
   private final AliyunOSSMockLocalStore localStore;
   private final HttpServer httpServer;
 
-  public static AliyunOSSMock start(Map<String, Object> properties) throws IOException {
-    AliyunOSSMock mock =
-        new AliyunOSSMock(
-            properties.getOrDefault(PROP_ROOT_DIR, ROOT_DIR_DEFAULT).toString(),
-            Integer.parseInt(
-                properties.getOrDefault(PROP_HTTP_PORT, PORT_HTTP_PORT_DEFAULT).toString()));
+  public static AliyunOSSMock start(Map<String, String> properties) throws IOException {
+    AliyunOSSMockProperties mockProperties = new AliyunOSSMockProperties(properties);
+    AliyunOSSMock mock = new AliyunOSSMock(mockProperties);
     mock.start();
     return mock;
   }
 
-  private AliyunOSSMock(String rootDir, int serverPort) throws IOException {
-    localStore = new AliyunOSSMockLocalStore(rootDir);
-    httpServer = HttpServer.create(new InetSocketAddress("localhost", serverPort), 0);
+  static AliyunOSSMock start(AliyunOSSMockProperties mockProperties) throws IOException {
+    AliyunOSSMock mock = new AliyunOSSMock(mockProperties);
+    mock.start();
+    return mock;
+  }
+
+  private AliyunOSSMock(AliyunOSSMockProperties mockProperties) throws IOException {
+    this.mockProperties = mockProperties;
+    this.localStore = new AliyunOSSMockLocalStore(mockProperties.rootDir());
+    this.httpServer =
+        HttpServer.create(
+            new InetSocketAddress(mockProperties.host(), mockProperties.httpPort()), 0);
+  }
+
+  AliyunOSSMockProperties mockProperties() {
+    return mockProperties;
   }
 
   private void start() {
