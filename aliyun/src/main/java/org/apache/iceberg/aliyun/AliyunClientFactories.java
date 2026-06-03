@@ -50,6 +50,13 @@ public class AliyunClientFactories {
             properties,
             AliyunProperties.CLIENT_FACTORY,
             DefaultAliyunClientFactory.class.getName());
+
+    if (DefaultAliyunClientFactory.class.getName().equals(factoryImpl)) {
+      AliyunClientFactory factory = new DefaultAliyunClientFactory();
+      factory.initialize(properties);
+      return factory;
+    }
+
     return loadClientFactory(factoryImpl, properties);
   }
 
@@ -111,6 +118,20 @@ public class AliyunClientFactories {
           && !Strings.isNullOrEmpty(oidcTokenFile);
     }
 
+    private static volatile OIDCRoleArnCredentialProvider oidcProvider;
+    private static final Object OIDC_PROVIDER_LOCK = new Object();
+
+    private OIDCRoleArnCredentialProvider getOidcProvider() {
+      if (oidcProvider == null) {
+        synchronized (OIDC_PROVIDER_LOCK) {
+          if (oidcProvider == null) {
+            oidcProvider = OIDCRoleArnCredentialProvider.builder().build();
+          }
+        }
+      }
+      return oidcProvider;
+    }
+
     @Override
     public OSS newOSSClient() {
       Preconditions.checkNotNull(
@@ -127,11 +148,11 @@ public class AliyunClientFactories {
               endpoint);
 
           // Use OIDCRoleArnCredentialProvider directly with built-in caching and auto-refresh
-          final OIDCRoleArnCredentialProvider oidcProvider =
-              OIDCRoleArnCredentialProvider.builder().build();
+          final OIDCRoleArnCredentialProvider provider = getOidcProvider();
 
           CredentialsProvider ossCredProvider =
               new CredentialsProvider() {
+                private volatile CredentialModel lastCred;
                 private volatile Credentials currentCredentials;
 
                 @Override
@@ -142,7 +163,10 @@ public class AliyunClientFactories {
                   try {
                     LOG.debug("Getting credentials using RRSA");
                     // getCredentials() returns cached credentials and auto-refreshes when needed
-                    CredentialModel cred = oidcProvider.getCredentials();
+                    CredentialModel cred = provider.getCredentials();
+                    if (cred == lastCred && currentCredentials != null) {
+                      return currentCredentials;
+                    }
                     long expirationSeconds = 0;
                     if (cred.getExpiration() > 0) {
                       expirationSeconds =
@@ -154,6 +178,7 @@ public class AliyunClientFactories {
                             cred.getAccessKeySecret(),
                             cred.getSecurityToken(),
                             expirationSeconds);
+                    this.lastCred = cred;
                     return this.currentCredentials;
                   } catch (Exception e) {
                     throw new RuntimeException("Failed to get RRSA credentials", e);
