@@ -1,0 +1,72 @@
+diff --git a/aliyun/src/main/java/org/apache/iceberg/aliyun/AliyunClientFactories.java b/aliyun/src/main/java/org/apache/iceberg/aliyun/AliyunClientFactories.java
+index 8bb88db83..49df08639 100644
+--- a/aliyun/src/main/java/org/apache/iceberg/aliyun/AliyunClientFactories.java
++++ b/aliyun/src/main/java/org/apache/iceberg/aliyun/AliyunClientFactories.java
+@@ -90,6 +90,7 @@ public class AliyunClientFactories {
+   static class DefaultAliyunClientFactory implements AliyunClientFactory {
+     private static final Logger LOG = LoggerFactory.getLogger(DefaultAliyunClientFactory.class);
+     private AliyunProperties aliyunProperties;
++    private volatile OIDCRoleArnCredentialProvider rrsaCredentialProvider;
+ 
+     DefaultAliyunClientFactory() {}
+ 
+@@ -111,6 +112,17 @@ public class AliyunClientFactories {
+           && !Strings.isNullOrEmpty(oidcTokenFile);
+     }
+ 
++    private OIDCRoleArnCredentialProvider getOrCreateRrsaProvider() {
++      if (rrsaCredentialProvider == null) {
++        synchronized (this) {
++          if (rrsaCredentialProvider == null) {
++            rrsaCredentialProvider = OIDCRoleArnCredentialProvider.builder().build();
++          }
++        }
++      }
++      return rrsaCredentialProvider;
++    }
++
+     @Override
+     public OSS newOSSClient() {
+       Preconditions.checkNotNull(
+@@ -126,14 +138,10 @@ public class AliyunClientFactories {
+               "Detected RRSA environment variables, creating OSS client with RRSA credentials for endpoint: {}",
+               endpoint);
+ 
+-          // Use OIDCRoleArnCredentialProvider directly with built-in caching and auto-refresh
+-          final OIDCRoleArnCredentialProvider oidcProvider =
+-              OIDCRoleArnCredentialProvider.builder().build();
++          OIDCRoleArnCredentialProvider oidcProvider = getOrCreateRrsaProvider();
+ 
+           CredentialsProvider ossCredProvider =
+               new CredentialsProvider() {
+-                private volatile Credentials currentCredentials;
+-
+                 @Override
+                 public void setCredentials(Credentials credentials) {}
+ 
+@@ -141,20 +149,17 @@ public class AliyunClientFactories {
+                 public Credentials getCredentials() {
+                   try {
+                     LOG.debug("Getting credentials using RRSA");
+-                    // getCredentials() returns cached credentials and auto-refreshes when needed
+                     CredentialModel cred = oidcProvider.getCredentials();
+                     long expirationSeconds = 0;
+                     if (cred.getExpiration() > 0) {
+                       expirationSeconds =
+                           (cred.getExpiration() - System.currentTimeMillis()) / 1000;
+                     }
+-                    this.currentCredentials =
+-                        new BasicCredentials(
+-                            cred.getAccessKeyId(),
+-                            cred.getAccessKeySecret(),
+-                            cred.getSecurityToken(),
+-                            expirationSeconds);
+-                    return this.currentCredentials;
++                    return new BasicCredentials(
++                        cred.getAccessKeyId(),
++                        cred.getAccessKeySecret(),
++                        cred.getSecurityToken(),
++                        expirationSeconds);
+                   } catch (Exception e) {
+                     throw new RuntimeException("Failed to get RRSA credentials", e);
+                   }
