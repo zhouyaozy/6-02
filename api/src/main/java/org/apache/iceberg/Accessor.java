@@ -22,7 +22,12 @@ import java.io.Serializable;
 import org.apache.iceberg.types.Type;
 
 public interface Accessor<T> extends Serializable {
-  Object get(T container);
+  default Object get(T container) {
+    if (container == null) {
+      return null;
+    }
+    throw new UnsupportedOperationException("Implementations must override get(T)");
+  }
 
   Type type();
 }

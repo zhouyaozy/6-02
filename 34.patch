@@ -1,0 +1,18 @@
+diff --git a/api/src/main/java/org/apache/iceberg/Accessor.java b/api/src/main/java/org/apache/iceberg/Accessor.java
+index 2a20a04df..ea2b1111c 100644
+--- a/api/src/main/java/org/apache/iceberg/Accessor.java
++++ b/api/src/main/java/org/apache/iceberg/Accessor.java
+@@ -22,7 +22,12 @@ import java.io.Serializable;
+ import org.apache.iceberg.types.Type;
+ 
+ public interface Accessor<T> extends Serializable {
+-  Object get(T container);
++  default Object get(T container) {
++    if (container == null) {
++      return null;
++    }
++    throw new UnsupportedOperationException("Implementations must override get(T)");
++  }
+ 
+   Type type();
+ }
