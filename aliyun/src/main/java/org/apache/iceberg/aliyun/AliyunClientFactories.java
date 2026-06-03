@@ -18,8 +18,8 @@
  */
 package org.apache.iceberg.aliyun;
 
+import com.aliyun.credentials.Client;
 import com.aliyun.credentials.models.CredentialModel;
-import com.aliyun.credentials.provider.OIDCRoleArnCredentialProvider;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.common.auth.BasicCredentials;
@@ -93,24 +93,6 @@ public class AliyunClientFactories {
 
     DefaultAliyunClientFactory() {}
 
-    /**
-     * Check if RRSA environment variables are present. RRSA requires
-     * ALIBABA_CLOUD_OIDC_PROVIDER_ARN, ALIBABA_CLOUD_ROLE_ARN and ALIBABA_CLOUD_OIDC_TOKEN_FILE to
-     * be set. RRSA stands for RAM Roles for Service Accounts. It works by letting pods assume
-     * specific RAM (Resource Access Management) roles when they need to call cloud APIs — no
-     * hard-coded credentials are needed, which reduces risk of credential leaks. Here is the
-     * document for RRSA:
-     * https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/use-rrsa-to-authorize-pods-to-access-different-cloud-services
-     */
-    boolean isRrsaEnvironmentAvailable() {
-      String oidcProviderArn = System.getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
-      String roleArn = System.getenv("ALIBABA_CLOUD_ROLE_ARN");
-      String oidcTokenFile = System.getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
-      return !Strings.isNullOrEmpty(oidcProviderArn)
-          && !Strings.isNullOrEmpty(roleArn)
-          && !Strings.isNullOrEmpty(oidcTokenFile);
-    }
-
     @Override
     public OSS newOSSClient() {
       Preconditions.checkNotNull(
@@ -119,16 +101,14 @@ public class AliyunClientFactories {
 
       String endpoint = aliyunProperties.ossEndpoint();
 
-      // Check if RRSA environment is available
-      if (isRrsaEnvironmentAvailable()) {
+      if (Strings.isNullOrEmpty(aliyunProperties.accessKeyId())) {
         try {
           LOG.info(
-              "Detected RRSA environment variables, creating OSS client with RRSA credentials for endpoint: {}",
+              "Access key ID is empty, creating OSS client with default credentials chain for endpoint: {}",
               endpoint);
 
-          // Use OIDCRoleArnCredentialProvider directly with built-in caching and auto-refresh
-          final OIDCRoleArnCredentialProvider oidcProvider =
-              OIDCRoleArnCredentialProvider.builder().build();
+          // Use com.aliyun.credentials.Client to support default credentials chain (RRSA, ECS RAM Role, etc.)
+          final Client credentialsClient = new Client();
 
           CredentialsProvider ossCredProvider =
               new CredentialsProvider() {
@@ -140,9 +120,9 @@ public class AliyunClientFactories {
                 @Override
                 public Credentials getCredentials() {
                   try {
-                    LOG.debug("Getting credentials using RRSA");
-                    // getCredentials() returns cached credentials and auto-refreshes when needed
-                    CredentialModel cred = oidcProvider.getCredentials();
+                    LOG.debug("Getting credentials using default credentials chain");
+                    // getCredential() returns cached credentials and auto-refreshes when needed
+                    CredentialModel cred = credentialsClient.getCredential();
                     long expirationSeconds = 0;
                     if (cred.getExpiration() > 0) {
                       expirationSeconds =
@@ -156,13 +136,13 @@ public class AliyunClientFactories {
                             expirationSeconds);
                     return this.currentCredentials;
                   } catch (Exception e) {
-                    throw new RuntimeException("Failed to get RRSA credentials", e);
+                    throw new RuntimeException("Failed to get credentials from default credentials chain", e);
                   }
                 }
               };
           return new OSSClientBuilder().build(endpoint, ossCredProvider);
         } catch (Exception e) {
-          throw new RuntimeException("Failed to create RRSA OSS client", e);
+          throw new RuntimeException("Failed to create OSS client with default credentials chain", e);
         }
       } else if (Strings.isNullOrEmpty(aliyunProperties.securityToken())) {
         return new OSSClientBuilder()
