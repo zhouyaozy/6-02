@@ -89,7 +89,11 @@ public class AliyunClientFactories {
 
   static class DefaultAliyunClientFactory implements AliyunClientFactory {
     private static final Logger LOG = LoggerFactory.getLogger(DefaultAliyunClientFactory.class);
+    private static final long RRSA_REFRESH_BUFFER_MILLIS = 60_000L;
+
     private AliyunProperties aliyunProperties;
+    private boolean rrsaEnvironmentAvailable;
+    private transient volatile CredentialsProvider rrsaCredentialsProvider;
 
     DefaultAliyunClientFactory() {}
 
@@ -103,12 +107,11 @@ public class AliyunClientFactories {
      * https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/use-rrsa-to-authorize-pods-to-access-different-cloud-services
      */
     boolean isRrsaEnvironmentAvailable() {
-      String oidcProviderArn = System.getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
-      String roleArn = System.getenv("ALIBABA_CLOUD_ROLE_ARN");
-      String oidcTokenFile = System.getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
-      return !Strings.isNullOrEmpty(oidcProviderArn)
-          && !Strings.isNullOrEmpty(roleArn)
-          && !Strings.isNullOrEmpty(oidcTokenFile);
+      if (aliyunProperties == null) {
+        return rrsaEnvironmentAvailableFromEnvironment();
+      }
+
+      return rrsaEnvironmentAvailable;
     }
 
     @Override
@@ -118,49 +121,12 @@ public class AliyunClientFactories {
           "Cannot create aliyun oss client before initializing the AliyunClientFactory.");
 
       String endpoint = aliyunProperties.ossEndpoint();
-
-      // Check if RRSA environment is available
       if (isRrsaEnvironmentAvailable()) {
         try {
           LOG.info(
               "Detected RRSA environment variables, creating OSS client with RRSA credentials for endpoint: {}",
               endpoint);
-
-          // Use OIDCRoleArnCredentialProvider directly with built-in caching and auto-refresh
-          final OIDCRoleArnCredentialProvider oidcProvider =
-              OIDCRoleArnCredentialProvider.builder().build();
-
-          CredentialsProvider ossCredProvider =
-              new CredentialsProvider() {
-                private volatile Credentials currentCredentials;
-
-                @Override
-                public void setCredentials(Credentials credentials) {}
-
-                @Override
-                public Credentials getCredentials() {
-                  try {
-                    LOG.debug("Getting credentials using RRSA");
-                    // getCredentials() returns cached credentials and auto-refreshes when needed
-                    CredentialModel cred = oidcProvider.getCredentials();
-                    long expirationSeconds = 0;
-                    if (cred.getExpiration() > 0) {
-                      expirationSeconds =
-                          (cred.getExpiration() - System.currentTimeMillis()) / 1000;
-                    }
-                    this.currentCredentials =
-                        new BasicCredentials(
-                            cred.getAccessKeyId(),
-                            cred.getAccessKeySecret(),
-                            cred.getSecurityToken(),
-                            expirationSeconds);
-                    return this.currentCredentials;
-                  } catch (Exception e) {
-                    throw new RuntimeException("Failed to get RRSA credentials", e);
-                  }
-                }
-              };
-          return new OSSClientBuilder().build(endpoint, ossCredProvider);
+          return new OSSClientBuilder().build(endpoint, rrsaCredentialsProvider());
         } catch (Exception e) {
           throw new RuntimeException("Failed to create RRSA OSS client", e);
         }
@@ -183,11 +149,101 @@ public class AliyunClientFactories {
     @Override
     public void initialize(Map<String, String> properties) {
       this.aliyunProperties = new AliyunProperties(properties);
+      this.rrsaEnvironmentAvailable = rrsaEnvironmentAvailableFromEnvironment();
+      this.rrsaCredentialsProvider = null;
     }
 
     @Override
     public AliyunProperties aliyunProperties() {
       return aliyunProperties;
+    }
+
+    private CredentialsProvider rrsaCredentialsProvider() {
+      CredentialsProvider provider = rrsaCredentialsProvider;
+      if (provider == null) {
+        synchronized (this) {
+          provider = rrsaCredentialsProvider;
+          if (provider == null) {
+            provider = new RrsaCredentialsProvider(OIDCRoleArnCredentialProvider.builder().build());
+            this.rrsaCredentialsProvider = provider;
+          }
+        }
+      }
+
+      return provider;
+    }
+
+    private static boolean rrsaEnvironmentAvailableFromEnvironment() {
+      String oidcProviderArn = System.getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
+      String roleArn = System.getenv("ALIBABA_CLOUD_ROLE_ARN");
+      String oidcTokenFile = System.getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+      return !Strings.isNullOrEmpty(oidcProviderArn)
+          && !Strings.isNullOrEmpty(roleArn)
+          && !Strings.isNullOrEmpty(oidcTokenFile);
+    }
+
+    private static class RrsaCredentialsProvider implements CredentialsProvider {
+      private final OIDCRoleArnCredentialProvider oidcProvider;
+      private volatile Credentials currentCredentials;
+      private volatile long expirationTimeMillis;
+
+      private RrsaCredentialsProvider(OIDCRoleArnCredentialProvider oidcProvider) {
+        this.oidcProvider = oidcProvider;
+      }
+
+      @Override
+      public void setCredentials(Credentials credentials) {
+        this.currentCredentials = credentials;
+        this.expirationTimeMillis = credentials == null ? 0L : Long.MAX_VALUE;
+      }
+
+      @Override
+      public Credentials getCredentials() {
+        Credentials credentials = currentCredentials;
+        if (!shouldRefresh(credentials)) {
+          return credentials;
+        }
+
+        synchronized (this) {
+          credentials = currentCredentials;
+          if (!shouldRefresh(credentials)) {
+            return credentials;
+          }
+
+          return refreshCredentials();
+        }
+      }
+
+      private Credentials refreshCredentials() {
+        try {
+          LOG.debug("Getting credentials using RRSA");
+          CredentialModel credential = oidcProvider.getCredentials();
+          long credentialExpirationTimeMillis = credential.getExpiration();
+          long expirationSeconds = 0L;
+          if (credentialExpirationTimeMillis > 0) {
+            expirationSeconds =
+                Math.max(0L, (credentialExpirationTimeMillis - System.currentTimeMillis()) / 1000);
+          }
+
+          Credentials refreshedCredentials =
+              new BasicCredentials(
+                  credential.getAccessKeyId(),
+                  credential.getAccessKeySecret(),
+                  credential.getSecurityToken(),
+                  expirationSeconds);
+          this.currentCredentials = refreshedCredentials;
+          this.expirationTimeMillis = credentialExpirationTimeMillis;
+          return refreshedCredentials;
+        } catch (Exception e) {
+          throw new RuntimeException("Failed to get RRSA credentials", e);
+        }
+      }
+
+      private boolean shouldRefresh(Credentials credentials) {
+        return credentials == null
+            || expirationTimeMillis <= 0L
+            || expirationTimeMillis - System.currentTimeMillis() <= RRSA_REFRESH_BUFFER_MILLIS;
+      }
     }
   }
 }
