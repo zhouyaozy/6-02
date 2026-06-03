@@ -1,0 +1,348 @@
+diff --git a/aliyun/src/main/java/org/apache/iceberg/aliyun/AliyunClientFactories.java b/aliyun/src/main/java/org/apache/iceberg/aliyun/AliyunClientFactories.java
+index 8bb88db83..52a3a8470 100644
+--- a/aliyun/src/main/java/org/apache/iceberg/aliyun/AliyunClientFactories.java
++++ b/aliyun/src/main/java/org/apache/iceberg/aliyun/AliyunClientFactories.java
+@@ -64,7 +64,11 @@ public class AliyunClientFactories {
+       String impl, Map<String, String> properties) {
+     DynConstructors.Ctor<AliyunClientFactory> ctor;
+     try {
+-      ctor = DynConstructors.builder(AliyunClientFactory.class).hiddenImpl(impl).buildChecked();
++      ctor =
++          DynConstructors.builder(AliyunClientFactory.class)
++              .loader(AliyunClientFactories.class.getClassLoader())
++              .hiddenImpl(impl)
++              .buildChecked();
+     } catch (NoSuchMethodException e) {
+       throw new IllegalArgumentException(
+           String.format(
+@@ -89,7 +93,12 @@ public class AliyunClientFactories {
+ 
+   static class DefaultAliyunClientFactory implements AliyunClientFactory {
+     private static final Logger LOG = LoggerFactory.getLogger(DefaultAliyunClientFactory.class);
++    private static final String RRSA_OIDC_PROVIDER_ARN = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN";
++    private static final String RRSA_ROLE_ARN = "ALIBABA_CLOUD_ROLE_ARN";
++    private static final String RRSA_OIDC_TOKEN_FILE = "ALIBABA_CLOUD_OIDC_TOKEN_FILE";
++
+     private AliyunProperties aliyunProperties;
++    private transient volatile OIDCRoleArnCredentialProvider rrsaCredentialProvider;
+ 
+     DefaultAliyunClientFactory() {}
+ 
+@@ -103,12 +112,9 @@ public class AliyunClientFactories {
+      * https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/use-rrsa-to-authorize-pods-to-access-different-cloud-services
+      */
+     boolean isRrsaEnvironmentAvailable() {
+-      String oidcProviderArn = System.getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
+-      String roleArn = System.getenv("ALIBABA_CLOUD_ROLE_ARN");
+-      String oidcTokenFile = System.getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+-      return !Strings.isNullOrEmpty(oidcProviderArn)
+-          && !Strings.isNullOrEmpty(roleArn)
+-          && !Strings.isNullOrEmpty(oidcTokenFile);
++      return !Strings.isNullOrEmpty(System.getenv(RRSA_OIDC_PROVIDER_ARN))
++          && !Strings.isNullOrEmpty(System.getenv(RRSA_ROLE_ARN))
++          && !Strings.isNullOrEmpty(System.getenv(RRSA_OIDC_TOKEN_FILE));
+     }
+ 
+     @Override
+@@ -118,71 +124,63 @@ public class AliyunClientFactories {
+           "Cannot create aliyun oss client before initializing the AliyunClientFactory.");
+ 
+       String endpoint = aliyunProperties.ossEndpoint();
+-
+-      // Check if RRSA environment is available
+       if (isRrsaEnvironmentAvailable()) {
+-        try {
+-          LOG.info(
+-              "Detected RRSA environment variables, creating OSS client with RRSA credentials for endpoint: {}",
+-              endpoint);
+-
+-          // Use OIDCRoleArnCredentialProvider directly with built-in caching and auto-refresh
+-          final OIDCRoleArnCredentialProvider oidcProvider =
+-              OIDCRoleArnCredentialProvider.builder().build();
+-
+-          CredentialsProvider ossCredProvider =
+-              new CredentialsProvider() {
+-                private volatile Credentials currentCredentials;
+-
+-                @Override
+-                public void setCredentials(Credentials credentials) {}
+-
+-                @Override
+-                public Credentials getCredentials() {
+-                  try {
+-                    LOG.debug("Getting credentials using RRSA");
+-                    // getCredentials() returns cached credentials and auto-refreshes when needed
+-                    CredentialModel cred = oidcProvider.getCredentials();
+-                    long expirationSeconds = 0;
+-                    if (cred.getExpiration() > 0) {
+-                      expirationSeconds =
+-                          (cred.getExpiration() - System.currentTimeMillis()) / 1000;
+-                    }
+-                    this.currentCredentials =
+-                        new BasicCredentials(
+-                            cred.getAccessKeyId(),
+-                            cred.getAccessKeySecret(),
+-                            cred.getSecurityToken(),
+-                            expirationSeconds);
+-                    return this.currentCredentials;
+-                  } catch (Exception e) {
+-                    throw new RuntimeException("Failed to get RRSA credentials", e);
+-                  }
+-                }
+-              };
+-          return new OSSClientBuilder().build(endpoint, ossCredProvider);
+-        } catch (Exception e) {
+-          throw new RuntimeException("Failed to create RRSA OSS client", e);
+-        }
+-      } else if (Strings.isNullOrEmpty(aliyunProperties.securityToken())) {
+-        return new OSSClientBuilder()
+-            .build(
+-                aliyunProperties.ossEndpoint(),
+-                aliyunProperties.accessKeyId(),
+-                aliyunProperties.accessKeySecret());
+-      } else {
++        LOG.info("Creating OSS client with RRSA credentials for endpoint: {}", endpoint);
++        return new OSSClientBuilder().build(endpoint, new RrsaCredentialsProvider(this));
++      }
++
++      if (Strings.isNullOrEmpty(aliyunProperties.securityToken())) {
+         return new OSSClientBuilder()
+-            .build(
+-                aliyunProperties.ossEndpoint(),
+-                aliyunProperties.accessKeyId(),
+-                aliyunProperties.accessKeySecret(),
+-                aliyunProperties.securityToken());
++            .build(endpoint, aliyunProperties.accessKeyId(), aliyunProperties.accessKeySecret());
++      }
++
++      return new OSSClientBuilder()
++          .build(
++              endpoint,
++              aliyunProperties.accessKeyId(),
++              aliyunProperties.accessKeySecret(),
++              aliyunProperties.securityToken());
++    }
++
++    Credentials newRrsaCredentials() {
++      try {
++        CredentialModel credentialModel = rrsaCredentialProvider().getCredentials();
++        return toCredentials(credentialModel);
++      } catch (Exception e) {
++        throw new IllegalStateException("Failed to get RRSA credentials", e);
++      }
++    }
++
++    OIDCRoleArnCredentialProvider rrsaCredentialProvider() {
++      if (rrsaCredentialProvider == null) {
++        synchronized (this) {
++          if (rrsaCredentialProvider == null) {
++            rrsaCredentialProvider = OIDCRoleArnCredentialProvider.builder().build();
++          }
++        }
+       }
++
++      return rrsaCredentialProvider;
++    }
++
++    private Credentials toCredentials(CredentialModel credentialModel) {
++      long expirationSeconds = 0;
++      if (credentialModel.getExpiration() > 0) {
++        expirationSeconds =
++            Math.max(0L, credentialModel.getExpiration() - System.currentTimeMillis()) / 1000;
++      }
++
++      return new BasicCredentials(
++          credentialModel.getAccessKeyId(),
++          credentialModel.getAccessKeySecret(),
++          credentialModel.getSecurityToken(),
++          expirationSeconds);
+     }
+ 
+     @Override
+     public void initialize(Map<String, String> properties) {
+       this.aliyunProperties = new AliyunProperties(properties);
++      this.rrsaCredentialProvider = null;
+     }
+ 
+     @Override
+@@ -190,4 +188,20 @@ public class AliyunClientFactories {
+       return aliyunProperties;
+     }
+   }
++
++  private static class RrsaCredentialsProvider implements CredentialsProvider {
++    private final DefaultAliyunClientFactory clientFactory;
++
++    private RrsaCredentialsProvider(DefaultAliyunClientFactory clientFactory) {
++      this.clientFactory = clientFactory;
++    }
++
++    @Override
++    public void setCredentials(Credentials credentials) {}
++
++    @Override
++    public Credentials getCredentials() {
++      return clientFactory.newRrsaCredentials();
++    }
++  }
+ }
+diff --git a/aliyun/src/test/java/org/apache/iceberg/aliyun/TestAliyunClientFactories.java b/aliyun/src/test/java/org/apache/iceberg/aliyun/TestAliyunClientFactories.java
+index 3fd4cfe87..b5c440436 100644
+--- a/aliyun/src/test/java/org/apache/iceberg/aliyun/TestAliyunClientFactories.java
++++ b/aliyun/src/test/java/org/apache/iceberg/aliyun/TestAliyunClientFactories.java
+@@ -21,6 +21,11 @@ package org.apache.iceberg.aliyun;
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
+ import com.aliyun.oss.OSS;
++import com.aliyun.oss.OSSClient;
++import com.aliyun.oss.common.auth.BasicCredentials;
++import com.aliyun.oss.common.auth.Credentials;
++import java.net.URI;
++import java.net.URISyntaxException;
+ import java.util.Map;
+ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+@@ -77,17 +82,6 @@ public class TestAliyunClientFactories {
+         .isInstanceOf(CustomFactory.class);
+   }
+ 
+-  /**
+-   * Test RRSA environment detection.
+-   *
+-   * <p>This test requires the following environment variables to be set:
+-   *
+-   * <ul>
+-   *   <li>ALIBABA_CLOUD_OIDC_PROVIDER_ARN
+-   *   <li>ALIBABA_CLOUD_ROLE_ARN
+-   *   <li>ALIBABA_CLOUD_OIDC_TOKEN_FILE
+-   * </ul>
+-   */
+   @Test
+   @SetEnvironmentVariable(
+       key = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN",
+@@ -97,42 +91,66 @@ public class TestAliyunClientFactories {
+       value = "acs:ram::123456789:role/test-rrsa-role")
+   @SetEnvironmentVariable(key = "ALIBABA_CLOUD_OIDC_TOKEN_FILE", value = "/tmp/oidc-token")
+   public void testRRSAEnvironmentDetection() {
+-    Map<String, String> properties = Maps.newHashMap();
+-    properties.put(AliyunProperties.OSS_ENDPOINT, "https://oss-cn-hangzhou.aliyuncs.com");
+-
+     AliyunClientFactories.DefaultAliyunClientFactory factory =
+         new AliyunClientFactories.DefaultAliyunClientFactory();
+-    factory.initialize(properties);
+     assertThat(factory.isRrsaEnvironmentAvailable()).isTrue();
++  }
++
++  @Test
++  public void testCreateClientWithConfiguredSecurityToken() throws URISyntaxException {
++    Map<String, String> properties =
++        ImmutableMap.of(
++            AliyunProperties.OSS_ENDPOINT,
++            "oss-cn-hangzhou.aliyuncs.com",
++            AliyunProperties.CLIENT_ACCESS_KEY_ID,
++            "access-key-id",
++            AliyunProperties.CLIENT_ACCESS_KEY_SECRET,
++            "access-key-secret",
++            AliyunProperties.CLIENT_SECURITY_TOKEN,
++            "security-token");
++
++    AliyunClientFactories.DefaultAliyunClientFactory factory = new NonRrsaAliyunClientFactory();
++    factory.initialize(properties);
+ 
+     OSS client = factory.newOSSClient();
+-    assertThat(client).as("OSS client should be created with RRSA").isNotNull();
+-
+-    // Try to actually use the client - this should trigger credential retrieval
+-    // With fake credentials, this should fail
+-    try {
+-      client.doesBucketExist("test-bucket");
+-      // If we get here with fake creds, something is wrong
+-      throw new AssertionError(
+-          "Expected operation to fail with fake RRSA credentials, but it succeeded");
+-    } catch (Exception e) {
+-      // Expected - fake RRSA credentials should cause failure
+-      assertThat(e).isNotNull();
+-    } finally {
+-      client.shutdown();
+-    }
++    assertThat(client).isInstanceOf(OSSClient.class);
++
++    OSSClient ossClient = (OSSClient) client;
++    assertThat(ossClient.getEndpoint()).isEqualTo(new URI("http://oss-cn-hangzhou.aliyuncs.com"));
++    assertCredentials(ossClient, "access-key-id", "access-key-secret", "security-token");
++
++    client.shutdown();
+   }
+ 
+   @Test
+-  public void testIsRrsaEnvironmentAvailableWithoutEnvVars() {
+-    // Verify that isRrsaEnvironmentAvailable returns false when env vars are not set
++  public void testCreateClientWithRrsaCredentials() throws URISyntaxException {
++    Map<String, String> properties =
++        ImmutableMap.of(AliyunProperties.OSS_ENDPOINT, "oss-cn-hangzhou.aliyuncs.com");
++
+     AliyunClientFactories.DefaultAliyunClientFactory factory =
+-        new AliyunClientFactories.DefaultAliyunClientFactory();
++        new StubRrsaAliyunClientFactory(
++            new BasicCredentials("rrsa-access-key-id", "rrsa-access-key-secret", "rrsa-token", 1));
++    factory.initialize(properties);
+ 
+-    // Assuming RRSA env vars are not set in test environment
+-    assertThat(factory.isRrsaEnvironmentAvailable())
+-        .as("RRSA should not be available without environment variables")
+-        .isFalse();
++    OSS client = factory.newOSSClient();
++    assertThat(client).isInstanceOf(OSSClient.class);
++
++    OSSClient ossClient = (OSSClient) client;
++    assertThat(ossClient.getEndpoint()).isEqualTo(new URI("http://oss-cn-hangzhou.aliyuncs.com"));
++    assertCredentials(
++        ossClient, "rrsa-access-key-id", "rrsa-access-key-secret", "rrsa-token");
++
++    client.shutdown();
++  }
++
++  private void assertCredentials(
++      OSSClient client, String accessKeyId, String accessKeySecret, String securityToken) {
++    assertThat(client.getCredentialsProvider().getCredentials().getAccessKeyId())
++        .isEqualTo(accessKeyId);
++    assertThat(client.getCredentialsProvider().getCredentials().getSecretAccessKey())
++        .isEqualTo(accessKeySecret);
++    assertThat(client.getCredentialsProvider().getCredentials().getSecurityToken())
++        .isEqualTo(securityToken);
+   }
+ 
+   public static class CustomFactory implements AliyunClientFactory {
+@@ -156,4 +174,32 @@ public class TestAliyunClientFactories {
+       return aliyunProperties;
+     }
+   }
++
++  private static class NonRrsaAliyunClientFactory
++      extends AliyunClientFactories.DefaultAliyunClientFactory {
++
++    @Override
++    boolean isRrsaEnvironmentAvailable() {
++      return false;
++    }
++  }
++
++  private static class StubRrsaAliyunClientFactory
++      extends AliyunClientFactories.DefaultAliyunClientFactory {
++    private final Credentials rrsaCredentials;
++
++    private StubRrsaAliyunClientFactory(Credentials rrsaCredentials) {
++      this.rrsaCredentials = rrsaCredentials;
++    }
++
++    @Override
++    boolean isRrsaEnvironmentAvailable() {
++      return true;
++    }
++
++    @Override
++    Credentials newRrsaCredentials() {
++      return rrsaCredentials;
++    }
++  }
+ }

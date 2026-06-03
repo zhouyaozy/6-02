@@ -21,6 +21,11 @@ package org.apache.iceberg.aliyun;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.aliyun.oss.OSS;
+import com.aliyun.oss.OSSClient;
+import com.aliyun.oss.common.auth.BasicCredentials;
+import com.aliyun.oss.common.auth.Credentials;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Map;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
@@ -77,17 +82,6 @@ public class TestAliyunClientFactories {
         .isInstanceOf(CustomFactory.class);
   }
 
-  /**
-   * Test RRSA environment detection.
-   *
-   * <p>This test requires the following environment variables to be set:
-   *
-   * <ul>
-   *   <li>ALIBABA_CLOUD_OIDC_PROVIDER_ARN
-   *   <li>ALIBABA_CLOUD_ROLE_ARN
-   *   <li>ALIBABA_CLOUD_OIDC_TOKEN_FILE
-   * </ul>
-   */
   @Test
   @SetEnvironmentVariable(
       key = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN",
@@ -97,42 +91,66 @@ public class TestAliyunClientFactories {
       value = "acs:ram::123456789:role/test-rrsa-role")
   @SetEnvironmentVariable(key = "ALIBABA_CLOUD_OIDC_TOKEN_FILE", value = "/tmp/oidc-token")
   public void testRRSAEnvironmentDetection() {
-    Map<String, String> properties = Maps.newHashMap();
-    properties.put(AliyunProperties.OSS_ENDPOINT, "https://oss-cn-hangzhou.aliyuncs.com");
-
     AliyunClientFactories.DefaultAliyunClientFactory factory =
         new AliyunClientFactories.DefaultAliyunClientFactory();
-    factory.initialize(properties);
     assertThat(factory.isRrsaEnvironmentAvailable()).isTrue();
-
-    OSS client = factory.newOSSClient();
-    assertThat(client).as("OSS client should be created with RRSA").isNotNull();
-
-    // Try to actually use the client - this should trigger credential retrieval
-    // With fake credentials, this should fail
-    try {
-      client.doesBucketExist("test-bucket");
-      // If we get here with fake creds, something is wrong
-      throw new AssertionError(
-          "Expected operation to fail with fake RRSA credentials, but it succeeded");
-    } catch (Exception e) {
-      // Expected - fake RRSA credentials should cause failure
-      assertThat(e).isNotNull();
-    } finally {
-      client.shutdown();
-    }
   }
 
   @Test
-  public void testIsRrsaEnvironmentAvailableWithoutEnvVars() {
-    // Verify that isRrsaEnvironmentAvailable returns false when env vars are not set
-    AliyunClientFactories.DefaultAliyunClientFactory factory =
-        new AliyunClientFactories.DefaultAliyunClientFactory();
+  public void testCreateClientWithConfiguredSecurityToken() throws URISyntaxException {
+    Map<String, String> properties =
+        ImmutableMap.of(
+            AliyunProperties.OSS_ENDPOINT,
+            "oss-cn-hangzhou.aliyuncs.com",
+            AliyunProperties.CLIENT_ACCESS_KEY_ID,
+            "access-key-id",
+            AliyunProperties.CLIENT_ACCESS_KEY_SECRET,
+            "access-key-secret",
+            AliyunProperties.CLIENT_SECURITY_TOKEN,
+            "security-token");
 
-    // Assuming RRSA env vars are not set in test environment
-    assertThat(factory.isRrsaEnvironmentAvailable())
-        .as("RRSA should not be available without environment variables")
-        .isFalse();
+    AliyunClientFactories.DefaultAliyunClientFactory factory = new NonRrsaAliyunClientFactory();
+    factory.initialize(properties);
+
+    OSS client = factory.newOSSClient();
+    assertThat(client).isInstanceOf(OSSClient.class);
+
+    OSSClient ossClient = (OSSClient) client;
+    assertThat(ossClient.getEndpoint()).isEqualTo(new URI("http://oss-cn-hangzhou.aliyuncs.com"));
+    assertCredentials(ossClient, "access-key-id", "access-key-secret", "security-token");
+
+    client.shutdown();
+  }
+
+  @Test
+  public void testCreateClientWithRrsaCredentials() throws URISyntaxException {
+    Map<String, String> properties =
+        ImmutableMap.of(AliyunProperties.OSS_ENDPOINT, "oss-cn-hangzhou.aliyuncs.com");
+
+    AliyunClientFactories.DefaultAliyunClientFactory factory =
+        new StubRrsaAliyunClientFactory(
+            new BasicCredentials("rrsa-access-key-id", "rrsa-access-key-secret", "rrsa-token", 1));
+    factory.initialize(properties);
+
+    OSS client = factory.newOSSClient();
+    assertThat(client).isInstanceOf(OSSClient.class);
+
+    OSSClient ossClient = (OSSClient) client;
+    assertThat(ossClient.getEndpoint()).isEqualTo(new URI("http://oss-cn-hangzhou.aliyuncs.com"));
+    assertCredentials(
+        ossClient, "rrsa-access-key-id", "rrsa-access-key-secret", "rrsa-token");
+
+    client.shutdown();
+  }
+
+  private void assertCredentials(
+      OSSClient client, String accessKeyId, String accessKeySecret, String securityToken) {
+    assertThat(client.getCredentialsProvider().getCredentials().getAccessKeyId())
+        .isEqualTo(accessKeyId);
+    assertThat(client.getCredentialsProvider().getCredentials().getSecretAccessKey())
+        .isEqualTo(accessKeySecret);
+    assertThat(client.getCredentialsProvider().getCredentials().getSecurityToken())
+        .isEqualTo(securityToken);
   }
 
   public static class CustomFactory implements AliyunClientFactory {
@@ -154,6 +172,34 @@ public class TestAliyunClientFactories {
     @Override
     public AliyunProperties aliyunProperties() {
       return aliyunProperties;
+    }
+  }
+
+  private static class NonRrsaAliyunClientFactory
+      extends AliyunClientFactories.DefaultAliyunClientFactory {
+
+    @Override
+    boolean isRrsaEnvironmentAvailable() {
+      return false;
+    }
+  }
+
+  private static class StubRrsaAliyunClientFactory
+      extends AliyunClientFactories.DefaultAliyunClientFactory {
+    private final Credentials rrsaCredentials;
+
+    private StubRrsaAliyunClientFactory(Credentials rrsaCredentials) {
+      this.rrsaCredentials = rrsaCredentials;
+    }
+
+    @Override
+    boolean isRrsaEnvironmentAvailable() {
+      return true;
+    }
+
+    @Override
+    Credentials newRrsaCredentials() {
+      return rrsaCredentials;
     }
   }
 }
