@@ -19,15 +19,33 @@
 package org.apache.iceberg.aliyun;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.aliyun.oss.OSS;
+import com.aliyun.oss.OSSClientBuilder;
+import com.aliyun.oss.common.auth.CredentialsProvider;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.junit.jupiter.api.Test;
 import org.junitpioneer.jupiter.SetEnvironmentVariable;
+import org.mockito.MockedConstruction;
+import org.mockito.Mockito;
 
-public class TestAliyunClientFactories {
+class TestAliyunClientFactories {
+  private static final String ENDPOINT = "https://oss-cn-hangzhou.aliyuncs.com";
+  private static final String ACCESS_KEY_ID = "access-key-id";
+  private static final String ACCESS_KEY_SECRET = "access-key-secret";
+  private static final String SECURITY_TOKEN = "security-token";
+  private static final String OIDC_TOKEN_FILE = "/tmp/iceberg-aliyun-rrsa-token";
 
   @Test
   public void testLoadDefault() {
@@ -77,17 +95,82 @@ public class TestAliyunClientFactories {
         .isInstanceOf(CustomFactory.class);
   }
 
-  /**
-   * Test RRSA environment detection.
-   *
-   * <p>This test requires the following environment variables to be set:
-   *
-   * <ul>
-   *   <li>ALIBABA_CLOUD_OIDC_PROVIDER_ARN
-   *   <li>ALIBABA_CLOUD_ROLE_ARN
-   *   <li>ALIBABA_CLOUD_OIDC_TOKEN_FILE
-   * </ul>
-   */
+  @Test
+  public void testLoadClientFactoryWithoutNoArgConstructor() {
+    assertThatThrownBy(
+            () ->
+                AliyunClientFactories.from(
+                    ImmutableMap.of(
+                        AliyunProperties.CLIENT_FACTORY,
+                        NoArgConstructorMissingFactory.class.getName())))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("missing no-arg constructor")
+        .hasMessageContaining(NoArgConstructorMissingFactory.class.getName());
+  }
+
+  @Test
+  public void testLoadClientFactoryRejectsNonFactoryImplementation() {
+    assertThatThrownBy(
+            () ->
+                AliyunClientFactories.from(
+                    ImmutableMap.of(AliyunProperties.CLIENT_FACTORY, String.class.getName())))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("does not implement AliyunClientFactory")
+        .hasMessageContaining(String.class.getName());
+  }
+
+  @Test
+  public void testNewOSSClientRequiresInitialization() {
+    AliyunClientFactories.DefaultAliyunClientFactory factory =
+        new AliyunClientFactories.DefaultAliyunClientFactory();
+
+    assertThatThrownBy(factory::newOSSClient)
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("before initializing the AliyunClientFactory");
+  }
+
+  @Test
+  public void testNewOSSClientUsesAccessKeyCredentials() {
+    OSS ossClient = mock(OSS.class);
+    AccessKeyOnlyFactory factory = new AccessKeyOnlyFactory();
+    factory.initialize(accessKeyProperties());
+
+    try (MockedConstruction<OSSClientBuilder> mockedConstruction =
+        Mockito.mockConstruction(
+            OSSClientBuilder.class,
+            (mockBuilder, context) ->
+                when(mockBuilder.build(ENDPOINT, ACCESS_KEY_ID, ACCESS_KEY_SECRET))
+                    .thenReturn(ossClient))) {
+      OSS client = factory.newOSSClient();
+
+      assertThat(client).isSameAs(ossClient);
+      assertThat(mockedConstruction.constructed()).hasSize(1);
+      verify(mockedConstruction.constructed().get(0))
+          .build(ENDPOINT, ACCESS_KEY_ID, ACCESS_KEY_SECRET);
+    }
+  }
+
+  @Test
+  public void testNewOSSClientUsesSecurityTokenCredentials() {
+    OSS ossClient = mock(OSS.class);
+    AccessKeyOnlyFactory factory = new AccessKeyOnlyFactory();
+    factory.initialize(accessKeyWithTokenProperties());
+
+    try (MockedConstruction<OSSClientBuilder> mockedConstruction =
+        Mockito.mockConstruction(
+            OSSClientBuilder.class,
+            (mockBuilder, context) ->
+                when(mockBuilder.build(ENDPOINT, ACCESS_KEY_ID, ACCESS_KEY_SECRET, SECURITY_TOKEN))
+                    .thenReturn(ossClient))) {
+      OSS client = factory.newOSSClient();
+
+      assertThat(client).isSameAs(ossClient);
+      assertThat(mockedConstruction.constructed()).hasSize(1);
+      verify(mockedConstruction.constructed().get(0))
+          .build(ENDPOINT, ACCESS_KEY_ID, ACCESS_KEY_SECRET, SECURITY_TOKEN);
+    }
+  }
+
   @Test
   @SetEnvironmentVariable(
       key = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN",
@@ -95,48 +178,54 @@ public class TestAliyunClientFactories {
   @SetEnvironmentVariable(
       key = "ALIBABA_CLOUD_ROLE_ARN",
       value = "acs:ram::123456789:role/test-rrsa-role")
-  @SetEnvironmentVariable(key = "ALIBABA_CLOUD_OIDC_TOKEN_FILE", value = "/tmp/oidc-token")
-  public void testRRSAEnvironmentDetection() {
-    Map<String, String> properties = Maps.newHashMap();
-    properties.put(AliyunProperties.OSS_ENDPOINT, "https://oss-cn-hangzhou.aliyuncs.com");
+  @SetEnvironmentVariable(key = "ALIBABA_CLOUD_OIDC_TOKEN_FILE", value = OIDC_TOKEN_FILE)
+  public void testNewOSSClientUsesRrsaCredentialsProvider() throws IOException {
+    Files.writeString(Path.of(OIDC_TOKEN_FILE), "token");
 
-    AliyunClientFactories.DefaultAliyunClientFactory factory =
-        new AliyunClientFactories.DefaultAliyunClientFactory();
-    factory.initialize(properties);
-    assertThat(factory.isRrsaEnvironmentAvailable()).isTrue();
+    OSS ossClient = mock(OSS.class);
+    RrsaFactory factory = new RrsaFactory();
+    factory.initialize(ImmutableMap.of(AliyunProperties.OSS_ENDPOINT, ENDPOINT));
 
-    OSS client = factory.newOSSClient();
-    assertThat(client).as("OSS client should be created with RRSA").isNotNull();
+    try (MockedConstruction<OSSClientBuilder> mockedConstruction =
+        Mockito.mockConstruction(
+            OSSClientBuilder.class,
+            (mockBuilder, context) ->
+                when(mockBuilder.build(eq(ENDPOINT), any(CredentialsProvider.class)))
+                    .thenReturn(ossClient))) {
+      OSS client = factory.newOSSClient();
 
-    // Try to actually use the client - this should trigger credential retrieval
-    // With fake credentials, this should fail
-    try {
-      client.doesBucketExist("test-bucket");
-      // If we get here with fake creds, something is wrong
-      throw new AssertionError(
-          "Expected operation to fail with fake RRSA credentials, but it succeeded");
-    } catch (Exception e) {
-      // Expected - fake RRSA credentials should cause failure
-      assertThat(e).isNotNull();
+      assertThat(client).isSameAs(ossClient);
+      assertThat(mockedConstruction.constructed()).hasSize(1);
+      verify(mockedConstruction.constructed().get(0))
+          .build(eq(ENDPOINT), any(CredentialsProvider.class));
     } finally {
-      client.shutdown();
+      Files.deleteIfExists(Path.of(OIDC_TOKEN_FILE));
     }
   }
 
-  @Test
-  public void testIsRrsaEnvironmentAvailableWithoutEnvVars() {
-    // Verify that isRrsaEnvironmentAvailable returns false when env vars are not set
-    AliyunClientFactories.DefaultAliyunClientFactory factory =
-        new AliyunClientFactories.DefaultAliyunClientFactory();
+  private static Map<String, String> accessKeyProperties() {
+    return ImmutableMap.of(
+        AliyunProperties.OSS_ENDPOINT,
+        ENDPOINT,
+        AliyunProperties.CLIENT_ACCESS_KEY_ID,
+        ACCESS_KEY_ID,
+        AliyunProperties.CLIENT_ACCESS_KEY_SECRET,
+        ACCESS_KEY_SECRET);
+  }
 
-    // Assuming RRSA env vars are not set in test environment
-    assertThat(factory.isRrsaEnvironmentAvailable())
-        .as("RRSA should not be available without environment variables")
-        .isFalse();
+  private static Map<String, String> accessKeyWithTokenProperties() {
+    return ImmutableMap.of(
+        AliyunProperties.OSS_ENDPOINT,
+        ENDPOINT,
+        AliyunProperties.CLIENT_ACCESS_KEY_ID,
+        ACCESS_KEY_ID,
+        AliyunProperties.CLIENT_ACCESS_KEY_SECRET,
+        ACCESS_KEY_SECRET,
+        AliyunProperties.CLIENT_SECURITY_TOKEN,
+        SECURITY_TOKEN);
   }
 
   public static class CustomFactory implements AliyunClientFactory {
-
     AliyunProperties aliyunProperties;
 
     public CustomFactory() {}
@@ -154,6 +243,37 @@ public class TestAliyunClientFactories {
     @Override
     public AliyunProperties aliyunProperties() {
       return aliyunProperties;
+    }
+  }
+
+  public static class NoArgConstructorMissingFactory implements AliyunClientFactory {
+    public NoArgConstructorMissingFactory(String ignored) {}
+
+    @Override
+    public OSS newOSSClient() {
+      return null;
+    }
+
+    @Override
+    public void initialize(Map<String, String> properties) {}
+
+    @Override
+    public AliyunProperties aliyunProperties() {
+      return null;
+    }
+  }
+
+  static class AccessKeyOnlyFactory extends AliyunClientFactories.DefaultAliyunClientFactory {
+    @Override
+    boolean isRrsaEnvironmentAvailable() {
+      return false;
+    }
+  }
+
+  static class RrsaFactory extends AliyunClientFactories.DefaultAliyunClientFactory {
+    @Override
+    boolean isRrsaEnvironmentAvailable() {
+      return true;
     }
   }
 }
