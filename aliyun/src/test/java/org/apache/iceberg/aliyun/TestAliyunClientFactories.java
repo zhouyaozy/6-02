@@ -19,13 +19,26 @@
 package org.apache.iceberg.aliyun;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
+import com.aliyun.credentials.models.CredentialModel;
+import com.aliyun.credentials.provider.OIDCRoleArnCredentialProvider;
 import com.aliyun.oss.OSS;
+import com.aliyun.oss.OSSClientBuilder;
+import com.aliyun.oss.common.auth.Credentials;
+import com.aliyun.oss.common.auth.CredentialsProvider;
 import java.util.Map;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.junit.jupiter.api.Test;
 import org.junitpioneer.jupiter.SetEnvironmentVariable;
+import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
 
 public class TestAliyunClientFactories {
 
@@ -77,52 +90,6 @@ public class TestAliyunClientFactories {
         .isInstanceOf(CustomFactory.class);
   }
 
-  /**
-   * Test RRSA environment detection.
-   *
-   * <p>This test requires the following environment variables to be set:
-   *
-   * <ul>
-   *   <li>ALIBABA_CLOUD_OIDC_PROVIDER_ARN
-   *   <li>ALIBABA_CLOUD_ROLE_ARN
-   *   <li>ALIBABA_CLOUD_OIDC_TOKEN_FILE
-   * </ul>
-   */
-  @Test
-  @SetEnvironmentVariable(
-      key = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN",
-      value = "acs:ram::123456789:oidc-provider/ack-rrsa-test")
-  @SetEnvironmentVariable(
-      key = "ALIBABA_CLOUD_ROLE_ARN",
-      value = "acs:ram::123456789:role/test-rrsa-role")
-  @SetEnvironmentVariable(key = "ALIBABA_CLOUD_OIDC_TOKEN_FILE", value = "/tmp/oidc-token")
-  public void testRRSAEnvironmentDetection() {
-    Map<String, String> properties = Maps.newHashMap();
-    properties.put(AliyunProperties.OSS_ENDPOINT, "https://oss-cn-hangzhou.aliyuncs.com");
-
-    AliyunClientFactories.DefaultAliyunClientFactory factory =
-        new AliyunClientFactories.DefaultAliyunClientFactory();
-    factory.initialize(properties);
-    assertThat(factory.isRrsaEnvironmentAvailable()).isTrue();
-
-    OSS client = factory.newOSSClient();
-    assertThat(client).as("OSS client should be created with RRSA").isNotNull();
-
-    // Try to actually use the client - this should trigger credential retrieval
-    // With fake credentials, this should fail
-    try {
-      client.doesBucketExist("test-bucket");
-      // If we get here with fake creds, something is wrong
-      throw new AssertionError(
-          "Expected operation to fail with fake RRSA credentials, but it succeeded");
-    } catch (Exception e) {
-      // Expected - fake RRSA credentials should cause failure
-      assertThat(e).isNotNull();
-    } finally {
-      client.shutdown();
-    }
-  }
-
   @Test
   public void testIsRrsaEnvironmentAvailableWithoutEnvVars() {
     // Verify that isRrsaEnvironmentAvailable returns false when env vars are not set
@@ -133,6 +100,127 @@ public class TestAliyunClientFactories {
     assertThat(factory.isRrsaEnvironmentAvailable())
         .as("RRSA should not be available without environment variables")
         .isFalse();
+  }
+
+  @Test
+  @SetEnvironmentVariable(
+      key = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN",
+      value = "acs:ram::123456789:oidc-provider/ack-rrsa-test")
+  @SetEnvironmentVariable(
+      key = "ALIBABA_CLOUD_ROLE_ARN",
+      value = "acs:ram::123456789:role/test-rrsa-role")
+  @SetEnvironmentVariable(key = "ALIBABA_CLOUD_OIDC_TOKEN_FILE", value = "/tmp/oidc-token")
+  public void testRRSAClientWithMock() {
+    Map<String, String> properties = Maps.newHashMap();
+    properties.put(AliyunProperties.OSS_ENDPOINT, "https://oss-cn-hangzhou.aliyuncs.com");
+
+    AliyunClientFactories.DefaultAliyunClientFactory factory =
+        new AliyunClientFactories.DefaultAliyunClientFactory();
+    factory.initialize(properties);
+
+    CredentialModel fakeCred = new CredentialModel();
+    fakeCred.setAccessKeyId("fake-id");
+    fakeCred.setAccessKeySecret("fake-secret");
+    fakeCred.setSecurityToken("fake-token");
+    fakeCred.setExpiration(System.currentTimeMillis() + 3600000L);
+
+    OIDCRoleArnCredentialProvider fakeProvider = mock(OIDCRoleArnCredentialProvider.class);
+    when(fakeProvider.getCredentials()).thenReturn(fakeCred);
+
+    OIDCRoleArnCredentialProvider.Builder mockBuilder =
+        mock(OIDCRoleArnCredentialProvider.Builder.class);
+    when(mockBuilder.build()).thenReturn(fakeProvider);
+
+    try (MockedStatic<OIDCRoleArnCredentialProvider> mockedStatic =
+            mockStatic(OIDCRoleArnCredentialProvider.class);
+        MockedConstruction<OSSClientBuilder> mockedBuilder =
+            mockConstruction(
+                OSSClientBuilder.class,
+                (mockBuilderInstance, context) -> {
+                  OSS fakeOss = mock(OSS.class);
+                  when(mockBuilderInstance.build(anyString(), any(CredentialsProvider.class)))
+                      .thenAnswer(
+                          invocation -> {
+                            CredentialsProvider provider = invocation.getArgument(1);
+                            Credentials credentials = provider.getCredentials();
+                            assertThat(credentials.getAccessKeyId()).isEqualTo("fake-id");
+                            assertThat(credentials.getSecretAccessKey()).isEqualTo("fake-secret");
+                            assertThat(credentials.getSecurityToken()).isEqualTo("fake-token");
+                            return fakeOss;
+                          });
+                })) {
+
+      mockedStatic.when(OIDCRoleArnCredentialProvider::builder).thenReturn(mockBuilder);
+
+      OSS client = factory.newOSSClient();
+      assertThat(client).isNotNull();
+    }
+  }
+
+  @Test
+  public void testBasicCredentialsWithMock() {
+    Map<String, String> properties = Maps.newHashMap();
+    properties.put(AliyunProperties.OSS_ENDPOINT, "https://oss-cn-hangzhou.aliyuncs.com");
+    properties.put(AliyunProperties.CLIENT_ACCESS_KEY_ID, "test-id");
+    properties.put(AliyunProperties.CLIENT_ACCESS_KEY_SECRET, "test-secret");
+
+    AliyunClientFactories.DefaultAliyunClientFactory factory =
+        new AliyunClientFactories.DefaultAliyunClientFactory();
+    factory.initialize(properties);
+
+    try (MockedConstruction<OSSClientBuilder> mockedBuilder =
+        mockConstruction(
+            OSSClientBuilder.class,
+            (mockBuilderInstance, context) -> {
+              OSS fakeOss = mock(OSS.class);
+              when(mockBuilderInstance.build(anyString(), anyString(), anyString()))
+                  .thenAnswer(
+                      invocation -> {
+                        assertThat(invocation.<String>getArgument(0))
+                            .isEqualTo("https://oss-cn-hangzhou.aliyuncs.com");
+                        assertThat(invocation.<String>getArgument(1)).isEqualTo("test-id");
+                        assertThat(invocation.<String>getArgument(2)).isEqualTo("test-secret");
+                        return fakeOss;
+                      });
+            })) {
+
+      OSS client = factory.newOSSClient();
+      assertThat(client).isNotNull();
+    }
+  }
+
+  @Test
+  public void testSecurityTokenCredentialsWithMock() {
+    Map<String, String> properties = Maps.newHashMap();
+    properties.put(AliyunProperties.OSS_ENDPOINT, "https://oss-cn-hangzhou.aliyuncs.com");
+    properties.put(AliyunProperties.CLIENT_ACCESS_KEY_ID, "test-id");
+    properties.put(AliyunProperties.CLIENT_ACCESS_KEY_SECRET, "test-secret");
+    properties.put(AliyunProperties.CLIENT_SECURITY_TOKEN, "test-token");
+
+    AliyunClientFactories.DefaultAliyunClientFactory factory =
+        new AliyunClientFactories.DefaultAliyunClientFactory();
+    factory.initialize(properties);
+
+    try (MockedConstruction<OSSClientBuilder> mockedBuilder =
+        mockConstruction(
+            OSSClientBuilder.class,
+            (mockBuilderInstance, context) -> {
+              OSS fakeOss = mock(OSS.class);
+              when(mockBuilderInstance.build(anyString(), anyString(), anyString(), anyString()))
+                  .thenAnswer(
+                      invocation -> {
+                        assertThat(invocation.<String>getArgument(0))
+                            .isEqualTo("https://oss-cn-hangzhou.aliyuncs.com");
+                        assertThat(invocation.<String>getArgument(1)).isEqualTo("test-id");
+                        assertThat(invocation.<String>getArgument(2)).isEqualTo("test-secret");
+                        assertThat(invocation.<String>getArgument(3)).isEqualTo("test-token");
+                        return fakeOss;
+                      });
+            })) {
+
+      OSS client = factory.newOSSClient();
+      assertThat(client).isNotNull();
+    }
   }
 
   public static class CustomFactory implements AliyunClientFactory {
