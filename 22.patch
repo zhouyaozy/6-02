@@ -1,0 +1,555 @@
+diff --git a/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMock.java b/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMock.java
+index 7894c1857..d97794a14 100644
+--- a/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMock.java
++++ b/aliyun/src/test/java/org/apache/iceberg/aliyun/oss/mock/AliyunOSSMock.java
+@@ -45,6 +45,11 @@ public class AliyunOSSMock {
+   static final String PROP_HTTP_PORT = "server.port";
+   static final int PORT_HTTP_PORT_DEFAULT = 9393;
+ 
++  private static final String APPLICATION_XML = "application/xml";
++  private static final String TEXT_PLAIN = "text/plain";
++  private static final String LOCALHOST = "localhost";
++  private static final ZoneId GMT_ZONE_ID = ZoneId.of("GMT");
++
+   private final AliyunOSSMockLocalStore localStore;
+   private final HttpServer httpServer;
+ 
+@@ -59,12 +64,12 @@ public class AliyunOSSMock {
+   }
+ 
+   private AliyunOSSMock(String rootDir, int serverPort) throws IOException {
+-    localStore = new AliyunOSSMockLocalStore(rootDir);
+-    httpServer = HttpServer.create(new InetSocketAddress("localhost", serverPort), 0);
++    this.localStore = new AliyunOSSMockLocalStore(rootDir);
++    this.httpServer = HttpServer.create(new InetSocketAddress(LOCALHOST, serverPort), 0);
+   }
+ 
+   private void start() {
+-    httpServer.createContext("/", new AliyunHttpHandler());
++    httpServer.createContext("/", new AliyunHttpHandler(localStore));
+     httpServer.start();
+   }
+ 
+@@ -72,70 +77,93 @@ public class AliyunOSSMock {
+     httpServer.stop(0);
+   }
+ 
+-  private class AliyunHttpHandler implements HttpHandler {
++  private static class AliyunHttpHandler implements HttpHandler {
++    private final AliyunOSSMockLocalStore localStore;
++
++    private AliyunHttpHandler(AliyunOSSMockLocalStore localStore) {
++      this.localStore = localStore;
++    }
+ 
+     @Override
+     public void handle(HttpExchange httpExchange) throws IOException {
+-      String request = httpExchange.getRequestURI().getPath().substring(1);
+-      String[] requests = request.split("/");
+-      String bucketName = requests[0];
+-      if (requests.length == 1) {
+-        // bucket operations
+-        if (httpExchange.getRequestMethod().equals("PUT")) {
++      RequestPath requestPath = RequestPath.from(httpExchange);
++      if (requestPath.isBucketRequest()) {
++        handleBucketRequest(requestPath.bucketName(), httpExchange);
++      } else {
++        handleObjectRequest(requestPath.bucketName(), requestPath.objectName(), httpExchange);
++      }
++    }
++
++    private void handleBucketRequest(String bucketName, HttpExchange httpExchange)
++        throws IOException {
++      switch (httpExchange.getRequestMethod()) {
++        case "PUT":
+           putBucket(bucketName, httpExchange);
+-        }
+-        if (httpExchange.getRequestMethod().equals("DELETE")) {
++          break;
++        case "DELETE":
+           deleteBucket(bucketName, httpExchange);
+-        }
+-      } else {
+-        // object operations
+-        String objectName = requests[1];
+-        if (objectName.contains("?")) {
+-          objectName = objectName.substring(0, objectName.indexOf("?"));
+-        }
+-        if (httpExchange.getRequestMethod().equals("PUT")) {
++          break;
++        default:
++      }
++    }
++
++    private void handleObjectRequest(
++        String bucketName, String objectName, HttpExchange httpExchange) throws IOException {
++      switch (httpExchange.getRequestMethod()) {
++        case "PUT":
+           putObject(bucketName, objectName, httpExchange);
+-        }
+-        if (httpExchange.getRequestMethod().equals("DELETE")) {
++          break;
++        case "DELETE":
+           deleteObject(bucketName, objectName, httpExchange);
+-        }
+-        if (httpExchange.getRequestMethod().equals("HEAD")) {
++          break;
++        case "HEAD":
+           getObjectMeta(bucketName, objectName, httpExchange);
+-        }
+-        if (httpExchange.getRequestMethod().equals("GET")) {
++          break;
++        case "GET":
+           getObject(bucketName, objectName, httpExchange);
+-        }
++          break;
++        default:
+       }
+     }
+ 
+     private void putBucket(String bucketName, HttpExchange httpExchange) throws IOException {
+       if (localStore.getBucket(bucketName) != null) {
+-        String errorMessage =
+-            createErrorResponse(
+-                OSSErrorCode.BUCKET_ALREADY_EXISTS, bucketName + " already exists.");
+-        handleResponse(httpExchange, 409, errorMessage, "application/xml");
++        sendErrorResponse(
++            httpExchange,
++            409,
++            OSSErrorCode.BUCKET_ALREADY_EXISTS,
++            bucketName + " already exists.");
+         return;
+       }
++
+       localStore.createBucket(bucketName);
+-      handleResponse(httpExchange, 200, "OK", "application/xml");
++      sendResponse(httpExchange, 200, "OK", APPLICATION_XML);
+     }
+ 
+     private void deleteBucket(String bucketName, HttpExchange httpExchange) throws IOException {
+-      verifyBucketExistence(bucketName, httpExchange);
++      if (!ensureBucketExists(bucketName, httpExchange)) {
++        return;
++      }
++
+       try {
+         localStore.deleteBucket(bucketName);
+       } catch (Exception e) {
+-        String errorMessage =
+-            createErrorResponse(
+-                OSSErrorCode.BUCKET_NOT_EMPTY, "The bucket you tried to delete is not empty.");
+-        handleResponse(httpExchange, 409, errorMessage, "application/xml");
++        sendErrorResponse(
++            httpExchange,
++            409,
++            OSSErrorCode.BUCKET_NOT_EMPTY,
++            "The bucket you tried to delete is not empty.");
++        return;
+       }
+-      handleResponse(httpExchange, 200, "OK", "application/xml");
++
++      sendResponse(httpExchange, 200, "OK", APPLICATION_XML);
+     }
+ 
+     private void putObject(String bucketName, String objectName, HttpExchange httpExchange)
+         throws IOException {
+-      verifyBucketExistence(bucketName, httpExchange);
++      if (!ensureBucketExists(bucketName, httpExchange)) {
++        return;
++      }
+ 
+       try (InputStream inputStream = httpExchange.getRequestBody()) {
+         ObjectMetadata metadata =
+@@ -147,166 +175,178 @@ public class AliyunOSSMock {
+                 httpExchange.getRequestHeaders().getFirst("Content-Headers"),
+                 ImmutableMap.of());
+ 
+-        httpExchange.getResponseHeaders().add("ETag", metadata.getContentMD5());
+-        httpExchange
+-            .getResponseHeaders()
+-            .add("Last-Modified", createDate(metadata.getLastModificationDate()));
+-        handleResponse(httpExchange, 200, "OK", "text/plain");
++        addObjectHeaders(httpExchange, metadata);
++        sendResponse(httpExchange, 200, "OK", TEXT_PLAIN);
+       } catch (Exception e) {
+-        handleResponse(httpExchange, 500, "Internal Server Error", "text/plain");
++        sendResponse(httpExchange, 500, "Internal Server Error", TEXT_PLAIN);
+       }
+     }
+ 
+     private void deleteObject(String bucketName, String objectName, HttpExchange httpExchange)
+         throws IOException {
+-      verifyBucketExistence(bucketName, httpExchange);
+-      localStore.deleteObject(bucketName, objectName);
++      if (!ensureBucketExists(bucketName, httpExchange)) {
++        return;
++      }
+ 
+-      handleResponse(httpExchange, 200, "OK", "text/plain");
++      localStore.deleteObject(bucketName, objectName);
++      sendResponse(httpExchange, 200, "OK", TEXT_PLAIN);
+     }
+ 
+     private void getObjectMeta(String bucketName, String objectName, HttpExchange httpExchange)
+         throws IOException {
+-      verifyBucketExistence(bucketName, httpExchange);
+-      ObjectMetadata metadata = verifyObjectExistence(bucketName, objectName);
++      if (!ensureBucketExists(bucketName, httpExchange)) {
++        return;
++      }
+ 
++      ObjectMetadata metadata = getObjectMetadata(bucketName, objectName);
+       if (metadata == null) {
+-        String errorMessage =
+-            createErrorResponse(OSSErrorCode.NO_SUCH_KEY, "The specify oss key does not exists.");
+-        handleResponse(httpExchange, 404, errorMessage, "application/xml");
+-      } else {
+-        httpExchange.getResponseHeaders().add("ETag", metadata.getContentMD5());
+-        httpExchange
+-            .getResponseHeaders()
+-            .add("Last-Modified", createDate(metadata.getLastModificationDate()));
+-        httpExchange
+-            .getResponseHeaders()
+-            .add("Content-Length", Long.toString(metadata.getContentLength()));
+-
+-        handleResponse(httpExchange, 200, "OK", "text/plain");
++        sendErrorResponse(
++            httpExchange,
++            404,
++            OSSErrorCode.NO_SUCH_KEY,
++            "The specify oss key does not exists.");
++        return;
+       }
++
++      addObjectHeaders(httpExchange, metadata);
++      httpExchange
++          .getResponseHeaders()
++          .add("Content-Length", Long.toString(metadata.getContentLength()));
++      sendResponse(httpExchange, 200, "OK", TEXT_PLAIN);
+     }
+ 
+     private void getObject(String bucketName, String objectName, HttpExchange httpExchange)
+         throws IOException {
+-      verifyBucketExistence(bucketName, httpExchange);
+-
+-      String filename = objectName;
+-      ObjectMetadata metadata = verifyObjectExistence(bucketName, filename);
++      if (!ensureBucketExists(bucketName, httpExchange)) {
++        return;
++      }
+ 
++      ObjectMetadata metadata = getObjectMetadata(bucketName, objectName);
+       if (metadata == null) {
+-        String errorMessage =
+-            createErrorResponse(OSSErrorCode.NO_SUCH_KEY, "The specify oss key does not exists.");
+-        handleResponse(httpExchange, 404, errorMessage, "application/xml");
++        sendErrorResponse(
++            httpExchange,
++            404,
++            OSSErrorCode.NO_SUCH_KEY,
++            "The specify oss key does not exists.");
+         return;
+       }
+ 
+-      Object range = httpExchange.getRequestHeaders().get("Range");
+-      if (range != null) {
+-        range = range.toString().replace("[bytes=", "").replace("]", "");
+-        String[] ranges = range.toString().split("-");
+-        long rangeStart = -1;
+-        if (!ranges[0].isEmpty()) {
+-          rangeStart = Long.parseLong(ranges[0]);
+-        }
+-        long rangeEnd = -1;
+-        if (ranges.length == 2 && !ranges[1].isEmpty()) {
+-          rangeEnd = Long.parseLong(ranges[1]);
+-        }
+-        if (rangeEnd == -1) {
+-          rangeEnd = Long.MAX_VALUE;
+-          if (rangeStart == -1) {
+-            rangeStart = 0;
+-          }
+-        }
++      RangeRequest rangeRequest = RangeRequest.from(httpExchange);
++      if (rangeRequest == null) {
++        getObject(metadata, httpExchange);
++      } else {
++        getObject(metadata, rangeRequest, httpExchange);
++      }
++    }
++
++    private void getObject(ObjectMetadata metadata, HttpExchange httpExchange)
++        throws IOException {
++      httpExchange.getResponseHeaders().add("Accept-Ranges", "bytes");
++      addObjectHeaders(httpExchange, metadata);
++      httpExchange.sendResponseHeaders(200, metadata.getContentLength());
++
++      try (OutputStream outputStream = httpExchange.getResponseBody();
++          FileInputStream inputStream = new FileInputStream(metadata.getDataFile())) {
++        ByteStreams.copy(inputStream, outputStream);
++      }
++    }
+ 
+-        long fileSize = metadata.getContentLength();
+-        long bytesToRead = Math.min(fileSize - 1, rangeEnd) - rangeStart + 1;
+-        long skipSize = rangeStart;
++    private void getObject(
++        ObjectMetadata metadata, RangeRequest rangeRequest, HttpExchange httpExchange)
++        throws IOException {
++      long rangeStart = rangeRequest.rangeStart();
++      long rangeEnd = rangeRequest.rangeEnd();
++      if (rangeEnd == -1) {
++        rangeEnd = Long.MAX_VALUE;
+         if (rangeStart == -1) {
+-          bytesToRead = Math.min(fileSize - 1, rangeEnd);
+-          skipSize = fileSize - rangeEnd;
+-        }
+-        if (rangeEnd == -1) {
+-          bytesToRead = fileSize - rangeStart;
+-        }
+-        if (bytesToRead < 0 || fileSize < rangeStart) {
+-          httpExchange.sendResponseHeaders(416, 1);
+-          return;
++          rangeStart = 0;
+         }
++      }
+ 
+-        httpExchange.getResponseHeaders().add("Accept-Ranges", "bytes");
+-        httpExchange
+-            .getResponseHeaders()
+-            .add(
+-                "Content-Range",
+-                "bytes "
+-                    + rangeStart
+-                    + "-"
+-                    + (bytesToRead + rangeStart + 1)
+-                    + "/"
+-                    + metadata.getContentLength());
+-        httpExchange.getResponseHeaders().add("ETag", metadata.getContentMD5());
+-        httpExchange
+-            .getResponseHeaders()
+-            .add("Last-Modified", createDate(metadata.getLastModificationDate()));
+-        httpExchange.getResponseHeaders().add("Content-Type", metadata.getContentType());
+-        httpExchange.getResponseHeaders().add("Content-Length", Long.toString(bytesToRead));
+-        httpExchange.sendResponseHeaders(206, bytesToRead);
+-        try (OutputStream outputStream = httpExchange.getResponseBody()) {
+-          try (FileInputStream fis = new FileInputStream(metadata.getDataFile())) {
+-            fis.skip(skipSize);
+-            ByteStreams.copy(new BoundedInputStream(fis, bytesToRead), outputStream);
+-          }
+-        }
+-      } else {
+-        httpExchange.getResponseHeaders().add("Accept-Ranges", "bytes");
+-        httpExchange.getResponseHeaders().add("ETag", metadata.getContentMD5());
+-        httpExchange
+-            .getResponseHeaders()
+-            .add("Last-Modified", createDate(metadata.getLastModificationDate()));
+-        httpExchange.getResponseHeaders().add("Content-Type", metadata.getContentType());
+-        httpExchange.sendResponseHeaders(200, metadata.getContentLength());
+-
+-        try (OutputStream outputStream = httpExchange.getResponseBody()) {
+-          try (FileInputStream fis = new FileInputStream(metadata.getDataFile())) {
+-            ByteStreams.copy(fis, outputStream);
+-          }
+-        }
++      long fileSize = metadata.getContentLength();
++      long bytesToRead = Math.min(fileSize - 1, rangeEnd) - rangeStart + 1;
++      long skipSize = rangeStart;
++      if (rangeStart == -1) {
++        bytesToRead = Math.min(fileSize - 1, rangeEnd);
++        skipSize = fileSize - rangeEnd;
++      }
++      if (rangeEnd == -1) {
++        bytesToRead = fileSize - rangeStart;
++      }
++      if (bytesToRead < 0 || fileSize < rangeStart) {
++        httpExchange.sendResponseHeaders(416, 1);
++        return;
++      }
++
++      httpExchange.getResponseHeaders().add("Accept-Ranges", "bytes");
++      httpExchange
++          .getResponseHeaders()
++          .add(
++              "Content-Range",
++              "bytes "
++                  + rangeStart
++                  + "-"
++                  + (bytesToRead + rangeStart + 1)
++                  + "/"
++                  + metadata.getContentLength());
++      addObjectHeaders(httpExchange, metadata);
++      httpExchange.getResponseHeaders().add("Content-Type", metadata.getContentType());
++      httpExchange.getResponseHeaders().add("Content-Length", Long.toString(bytesToRead));
++      httpExchange.sendResponseHeaders(206, bytesToRead);
++
++      try (OutputStream outputStream = httpExchange.getResponseBody();
++          FileInputStream inputStream = new FileInputStream(metadata.getDataFile())) {
++        inputStream.skip(skipSize);
++        ByteStreams.copy(new BoundedInputStream(inputStream, bytesToRead), outputStream);
+       }
+     }
+ 
+-    private void verifyBucketExistence(String bucketName, HttpExchange httpExchange)
++    private boolean ensureBucketExists(String bucketName, HttpExchange httpExchange)
+         throws IOException {
+       Bucket bucket = localStore.getBucket(bucketName);
+       if (bucket == null) {
+-        String errorMessage =
+-            createErrorResponse(
+-                OSSErrorCode.NO_SUCH_BUCKET, "The specified bucket does not exist.");
+-        handleResponse(httpExchange, 404, errorMessage, "application/xml");
++        sendErrorResponse(
++            httpExchange,
++            404,
++            OSSErrorCode.NO_SUCH_BUCKET,
++            "The specified bucket does not exist.");
++        return false;
+       }
++
++      return true;
+     }
+ 
+-    private ObjectMetadata verifyObjectExistence(String bucketName, String fileName) {
+-      ObjectMetadata objectMetadata = null;
++    private ObjectMetadata getObjectMetadata(String bucketName, String objectName) {
+       try {
+-        objectMetadata = localStore.getObjectMetadata(bucketName, fileName);
++        return localStore.getObjectMetadata(bucketName, objectName);
+       } catch (IOException e) {
+-        // no-op
++        return null;
+       }
++    }
+ 
+-      return objectMetadata;
++    private void addObjectHeaders(HttpExchange httpExchange, ObjectMetadata metadata) {
++      httpExchange.getResponseHeaders().add("ETag", metadata.getContentMD5());
++      httpExchange
++          .getResponseHeaders()
++          .add("Last-Modified", createDate(metadata.getLastModificationDate()));
+     }
+ 
+-    private void handleResponse(
++    private void sendResponse(
+         HttpExchange httpExchange, int responseCode, String responsePayload, String contentType)
+         throws IOException {
+-      OutputStream outputStream = httpExchange.getResponseBody();
++      byte[] responseBytes = responsePayload.getBytes();
+       httpExchange.getResponseHeaders().put("Content-Type", Collections.singletonList(contentType));
+-      httpExchange.sendResponseHeaders(responseCode, responsePayload.length());
+-      outputStream.write(responsePayload.getBytes());
+-      outputStream.flush();
+-      outputStream.close();
++      httpExchange.sendResponseHeaders(responseCode, responseBytes.length);
++      try (OutputStream outputStream = httpExchange.getResponseBody()) {
++        outputStream.write(responseBytes);
++        outputStream.flush();
++      }
++    }
++
++    private void sendErrorResponse(
++        HttpExchange httpExchange, int responseCode, String errorCode, String message)
++        throws IOException {
++      sendResponse(httpExchange, responseCode, createErrorResponse(errorCode, message), APPLICATION_XML);
+     }
+ 
+     private String createErrorResponse(String errorCode, String message) {
+@@ -319,12 +359,87 @@ public class AliyunOSSMock {
+     }
+ 
+     private String createDate(long timestamp) {
+-      java.util.Date date = new java.util.Date(timestamp);
+-      ZonedDateTime dateTime = date.toInstant().atZone(ZoneId.of("GMT"));
++      ZonedDateTime dateTime = new java.util.Date(timestamp).toInstant().atZone(GMT_ZONE_ID);
+       return dateTime.format(DateTimeFormatter.RFC_1123_DATE_TIME);
+     }
+   }
+ 
++  private static class RequestPath {
++    private final String bucketName;
++    private final String objectName;
++
++    private RequestPath(String bucketName, String objectName) {
++      this.bucketName = bucketName;
++      this.objectName = objectName;
++    }
++
++    private static RequestPath from(HttpExchange httpExchange) {
++      String request = httpExchange.getRequestURI().getPath().substring(1);
++      String[] requests = request.split("/");
++      String bucketName = requests[0];
++      if (requests.length == 1) {
++        return new RequestPath(bucketName, null);
++      }
++
++      String objectName = requests[1];
++      if (objectName.contains("?")) {
++        objectName = objectName.substring(0, objectName.indexOf('?'));
++      }
++
++      return new RequestPath(bucketName, objectName);
++    }
++
++    private String bucketName() {
++      return bucketName;
++    }
++
++    private String objectName() {
++      return objectName;
++    }
++
++    private boolean isBucketRequest() {
++      return objectName == null;
++    }
++  }
++
++  private static class RangeRequest {
++    private final long rangeStart;
++    private final long rangeEnd;
++
++    private RangeRequest(long rangeStart, long rangeEnd) {
++      this.rangeStart = rangeStart;
++      this.rangeEnd = rangeEnd;
++    }
++
++    private static RangeRequest from(HttpExchange httpExchange) {
++      String rangeHeader = httpExchange.getRequestHeaders().getFirst("Range");
++      if (rangeHeader == null) {
++        return null;
++      }
++
++      String[] ranges = rangeHeader.replace("bytes=", "").split("-");
++      long rangeStart = -1;
++      if (!ranges[0].isEmpty()) {
++        rangeStart = Long.parseLong(ranges[0]);
++      }
++
++      long rangeEnd = -1;
++      if (ranges.length == 2 && !ranges[1].isEmpty()) {
++        rangeEnd = Long.parseLong(ranges[1]);
++      }
++
++      return new RangeRequest(rangeStart, rangeEnd);
++    }
++
++    private long rangeStart() {
++      return rangeStart;
++    }
++
++    private long rangeEnd() {
++      return rangeEnd;
++    }
++  }
++
+   /**
+    * Reads bytes up to a maximum length, if its count goes above that, it stops.
+    *
+@@ -336,7 +451,7 @@ public class AliyunOSSMock {
+    *
+    * <p>This code is borrowed from `org.apache.commons:commons-io`
+    */
+-  public class BoundedInputStream extends FilterInputStream {
++  public static class BoundedInputStream extends FilterInputStream {
+ 
+     /** The max count of bytes to read. */
+     private final long maxCount;
