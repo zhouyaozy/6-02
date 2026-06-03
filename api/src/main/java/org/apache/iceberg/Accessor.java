@@ -25,4 +25,8 @@ public interface Accessor<T> extends Serializable {
   Object get(T container);
 
   Type type();
+
+  default void service() {
+    // New service method
+  }
 }
