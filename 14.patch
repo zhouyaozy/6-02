@@ -1,0 +1,355 @@
+diff --git a/build.gradle b/build.gradle
+index ac5814b57..c590262f7 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -374,6 +374,15 @@ project(':iceberg-common') {
+   }
+ }
+ 
++project(':iceberg-properties') {
++  test {
++    useJUnitPlatform()
++  }
++  dependencies {
++    implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
++  }
++}
++
+ project(':iceberg-core') {
+   test {
+     useJUnitPlatform()
+diff --git a/properties/src/main/java/org/apache/iceberg/properties/AppProperties.java b/properties/src/main/java/org/apache/iceberg/properties/AppProperties.java
+new file mode 100644
+index 000000000..d895811b9
+--- /dev/null
++++ b/properties/src/main/java/org/apache/iceberg/properties/AppProperties.java
+@@ -0,0 +1,108 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.iceberg.properties;
++
++import java.util.Collections;
++import java.util.Map;
++import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
++import org.apache.iceberg.relocated.com.google.common.collect.Maps;
++
++public class AppProperties {
++
++  private final Map<String, Object> properties;
++
++  private AppProperties(Map<String, Object> properties) {
++    this.properties = Collections.unmodifiableMap(Maps.newHashMap(properties));
++  }
++
++  public static Builder builder() {
++    return new Builder();
++  }
++
++  public String get(String key) {
++    return get(key, null);
++  }
++
++  public String get(String key, String defaultValue) {
++    Object value = properties.get(key);
++    if (value != null) {
++      return value.toString();
++    }
++    return defaultValue;
++  }
++
++  public int getInt(String key, int defaultValue) {
++    Object value = properties.get(key);
++    if (value != null) {
++      return Integer.parseInt(value.toString());
++    }
++    return defaultValue;
++  }
++
++  public long getLong(String key, long defaultValue) {
++    Object value = properties.get(key);
++    if (value != null) {
++      return Long.parseLong(value.toString());
++    }
++    return defaultValue;
++  }
++
++  public boolean getBoolean(String key, boolean defaultValue) {
++    Object value = properties.get(key);
++    if (value != null) {
++      return Boolean.parseBoolean(value.toString());
++    }
++    return defaultValue;
++  }
++
++  public double getDouble(String key, double defaultValue) {
++    Object value = properties.get(key);
++    if (value != null) {
++      return Double.parseDouble(value.toString());
++    }
++    return defaultValue;
++  }
++
++  public Map<String, Object> asMap() {
++    return properties;
++  }
++
++  public static class Builder {
++    private final Map<String, Object> props = Maps.newHashMap();
++
++    private Builder() {
++    }
++
++    public Builder with(String key, Object value) {
++      Preconditions.checkNotNull(key, "Key cannot be null");
++      props.put(key, value);
++      return this;
++    }
++
++    public Builder withAll(Map<String, Object> properties) {
++      Preconditions.checkNotNull(properties, "Properties cannot be null");
++      props.putAll(properties);
++      return this;
++    }
++
++    public AppProperties build() {
++      return new AppProperties(props);
++    }
++  }
++}
+\ No newline at end of file
+diff --git a/properties/src/main/java/org/apache/iceberg/properties/PropertyEntry.java b/properties/src/main/java/org/apache/iceberg/properties/PropertyEntry.java
+new file mode 100644
+index 000000000..38cc45375
+--- /dev/null
++++ b/properties/src/main/java/org/apache/iceberg/properties/PropertyEntry.java
+@@ -0,0 +1,61 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.iceberg.properties;
++
++import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
++
++public class PropertyEntry<T> {
++
++  private final String key;
++  private final T defaultValue;
++
++  private PropertyEntry(String key, T defaultValue) {
++    Preconditions.checkNotNull(key, "Key cannot be null");
++    this.key = key;
++    this.defaultValue = defaultValue;
++  }
++
++  public static PropertyEntry<String> string(String key, String defaultValue) {
++    return new PropertyEntry<>(key, defaultValue);
++  }
++
++  public static PropertyEntry<Integer> integer(String key, int defaultValue) {
++    return new PropertyEntry<>(key, defaultValue);
++  }
++
++  public static PropertyEntry<Long> longEntry(String key, long defaultValue) {
++    return new PropertyEntry<>(key, defaultValue);
++  }
++
++  public static PropertyEntry<Boolean> bool(String key, boolean defaultValue) {
++    return new PropertyEntry<>(key, defaultValue);
++  }
++
++  public static PropertyEntry<Double> doubleEntry(String key, double defaultValue) {
++    return new PropertyEntry<>(key, defaultValue);
++  }
++
++  public String key() {
++    return key;
++  }
++
++  public T defaultValue() {
++    return defaultValue;
++  }
++}
+\ No newline at end of file
+diff --git a/properties/src/test/java/org/apache/iceberg/properties/TestAppProperties.java b/properties/src/test/java/org/apache/iceberg/properties/TestAppProperties.java
+new file mode 100644
+index 000000000..58744ef87
+--- /dev/null
++++ b/properties/src/test/java/org/apache/iceberg/properties/TestAppProperties.java
+@@ -0,0 +1,125 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.iceberg.properties;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import java.util.HashMap;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++
++public class TestAppProperties {
++
++  private static final String PROP_ROOT_DIR = "root-dir";
++  private static final String ROOT_DIR_DEFAULT = "/tmp";
++
++  private static final String PROP_HTTP_PORT = "server.port";
++  private static final int PORT_HTTP_PORT_DEFAULT = 9393;
++
++  @Test
++  public void testBuildWithDefaults() {
++    AppProperties props = AppProperties.builder().build();
++
++    assertThat(props.get(PROP_ROOT_DIR, ROOT_DIR_DEFAULT)).isEqualTo("/tmp");
++    assertThat(props.getInt(PROP_HTTP_PORT, PORT_HTTP_PORT_DEFAULT)).isEqualTo(9393);
++  }
++
++  @Test
++  public void testBuildWithCustomValues() {
++    AppProperties props =
++        AppProperties.builder()
++            .with(PROP_ROOT_DIR, "/custom/dir")
++            .with(PROP_HTTP_PORT, 8080)
++            .build();
++
++    assertThat(props.get(PROP_ROOT_DIR, ROOT_DIR_DEFAULT)).isEqualTo("/custom/dir");
++    assertThat(props.getInt(PROP_HTTP_PORT, PORT_HTTP_PORT_DEFAULT)).isEqualTo(8080);
++  }
++
++  @Test
++  public void testGetOrDefault() {
++    AppProperties props = AppProperties.builder().build();
++
++    assertThat(props.get("nonexistent", "default")).isEqualTo("default");
++    assertThat(props.getInt("nonexistent", 42)).isEqualTo(42);
++    assertThat(props.getLong("nonexistent", 100L)).isEqualTo(100L);
++    assertThat(props.getBoolean("nonexistent", true)).isTrue();
++    assertThat(props.getDouble("nonexistent", 3.14)).isEqualTo(3.14);
++  }
++
++  @Test
++  public void testGetWithNullDefault() {
++    AppProperties props = AppProperties.builder().build();
++
++    assertThat(props.get("nonexistent")).isNull();
++  }
++
++  @Test
++  public void testWithAll() {
++    Map<String, Object> source = new HashMap<>();
++    source.put(PROP_ROOT_DIR, "/data");
++    source.put(PROP_HTTP_PORT, 7070);
++
++    AppProperties props = AppProperties.builder().withAll(source).build();
++
++    assertThat(props.get(PROP_ROOT_DIR, ROOT_DIR_DEFAULT)).isEqualTo("/data");
++    assertThat(props.getInt(PROP_HTTP_PORT, PORT_HTTP_PORT_DEFAULT)).isEqualTo(7070);
++  }
++
++  @Test
++  public void testAsMap() {
++    AppProperties props =
++        AppProperties.builder().with(PROP_ROOT_DIR, "/data").build();
++
++    Map<String, Object> map = props.asMap();
++    assertThat(map).containsEntry(PROP_ROOT_DIR, "/data");
++  }
++
++  @Test
++  public void testPropertyEntryUsage() {
++    PropertyEntry<String> rootDir = PropertyEntry.string("root-dir", "/tmp");
++    PropertyEntry<Integer> port = PropertyEntry.integer("server.port", 9393);
++
++    AppProperties props =
++        AppProperties.builder()
++            .with(rootDir.key(), "/custom")
++            .with(port.key(), 8080)
++            .build();
++
++    assertThat(props.get(rootDir.key(), rootDir.defaultValue())).isEqualTo("/custom");
++    assertThat(props.getInt(port.key(), port.defaultValue())).isEqualTo(8080);
++  }
++
++  @Test
++  public void testPropertyEntryDefaults() {
++    PropertyEntry<String> rootDir = PropertyEntry.string("root-dir", "/tmp");
++    PropertyEntry<Integer> port = PropertyEntry.integer("server.port", 9393);
++    PropertyEntry<Long> timeout = PropertyEntry.longEntry("timeout", 30000L);
++    PropertyEntry<Boolean> enabled = PropertyEntry.bool("enabled", true);
++    PropertyEntry<Double> ratio = PropertyEntry.doubleEntry("ratio", 0.75);
++
++    AppProperties props = AppProperties.builder().build();
++
++    assertThat(props.get(rootDir.key(), rootDir.defaultValue())).isEqualTo("/tmp");
++    assertThat(props.getInt(port.key(), port.defaultValue())).isEqualTo(9393);
++    assertThat(props.getLong(timeout.key(), timeout.defaultValue())).isEqualTo(30000L);
++    assertThat(props.getBoolean(enabled.key(), enabled.defaultValue())).isTrue();
++    assertThat(props.getDouble(ratio.key(), ratio.defaultValue())).isEqualTo(0.75);
++  }
++}
+\ No newline at end of file
+diff --git a/settings.gradle b/settings.gradle
+index 3f86a8ee3..8382d99a7 100644
+--- a/settings.gradle
++++ b/settings.gradle
+@@ -43,6 +43,7 @@ include 'snowflake'
+ include 'delta-lake'
+ include 'open-api'
+ include 'mr'
++include 'properties'
+ 
+ project(':bom').name = 'iceberg-bom'
+ project(':api').name = 'iceberg-api'
+@@ -69,6 +70,7 @@ project(':snowflake').name = 'iceberg-snowflake'
+ project(':delta-lake').name = 'iceberg-delta-lake'
+ project(':open-api').name = 'iceberg-open-api'
+ project(':mr').name = 'iceberg-mr'
++project(':properties').name = 'iceberg-properties'
+ 
+ if (null != System.getProperty("allModules")) {
+   System.setProperty("flinkVersions", System.getProperty("knownFlinkVersions"))

@@ -374,6 +374,15 @@ project(':iceberg-common') {
   }
 }
 
+project(':iceberg-properties') {
+  test {
+    useJUnitPlatform()
+  }
+  dependencies {
+    implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
+  }
+}
+
 project(':iceberg-core') {
   test {
     useJUnitPlatform()
