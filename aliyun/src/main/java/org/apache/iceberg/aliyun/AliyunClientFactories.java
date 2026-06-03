@@ -90,6 +90,8 @@ public class AliyunClientFactories {
   static class DefaultAliyunClientFactory implements AliyunClientFactory {
     private static final Logger LOG = LoggerFactory.getLogger(DefaultAliyunClientFactory.class);
     private AliyunProperties aliyunProperties;
+    private volatile Boolean rrsaAvailable;
+    private volatile OIDCRoleArnCredentialProvider cachedOidcCredentialProvider;
 
     DefaultAliyunClientFactory() {}
 
@@ -103,12 +105,31 @@ public class AliyunClientFactories {
      * https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/use-rrsa-to-authorize-pods-to-access-different-cloud-services
      */
     boolean isRrsaEnvironmentAvailable() {
-      String oidcProviderArn = System.getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
-      String roleArn = System.getenv("ALIBABA_CLOUD_ROLE_ARN");
-      String oidcTokenFile = System.getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
-      return !Strings.isNullOrEmpty(oidcProviderArn)
-          && !Strings.isNullOrEmpty(roleArn)
-          && !Strings.isNullOrEmpty(oidcTokenFile);
+      if (rrsaAvailable == null) {
+        synchronized (this) {
+          if (rrsaAvailable == null) {
+            String oidcProviderArn = System.getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
+            String roleArn = System.getenv("ALIBABA_CLOUD_ROLE_ARN");
+            String oidcTokenFile = System.getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+            rrsaAvailable =
+                !Strings.isNullOrEmpty(oidcProviderArn)
+                    && !Strings.isNullOrEmpty(roleArn)
+                    && !Strings.isNullOrEmpty(oidcTokenFile);
+          }
+        }
+      }
+      return rrsaAvailable;
+    }
+
+    private OIDCRoleArnCredentialProvider rrsaOidcCredentialProvider() {
+      if (cachedOidcCredentialProvider == null) {
+        synchronized (this) {
+          if (cachedOidcCredentialProvider == null) {
+            cachedOidcCredentialProvider = OIDCRoleArnCredentialProvider.builder().build();
+          }
+        }
+      }
+      return cachedOidcCredentialProvider;
     }
 
     @Override
@@ -119,21 +140,16 @@ public class AliyunClientFactories {
 
       String endpoint = aliyunProperties.ossEndpoint();
 
-      // Check if RRSA environment is available
       if (isRrsaEnvironmentAvailable()) {
         try {
           LOG.info(
               "Detected RRSA environment variables, creating OSS client with RRSA credentials for endpoint: {}",
               endpoint);
 
-          // Use OIDCRoleArnCredentialProvider directly with built-in caching and auto-refresh
-          final OIDCRoleArnCredentialProvider oidcProvider =
-              OIDCRoleArnCredentialProvider.builder().build();
+          OIDCRoleArnCredentialProvider oidcProvider = rrsaOidcCredentialProvider();
 
           CredentialsProvider ossCredProvider =
               new CredentialsProvider() {
-                private volatile Credentials currentCredentials;
-
                 @Override
                 public void setCredentials(Credentials credentials) {}
 
@@ -141,20 +157,17 @@ public class AliyunClientFactories {
                 public Credentials getCredentials() {
                   try {
                     LOG.debug("Getting credentials using RRSA");
-                    // getCredentials() returns cached credentials and auto-refreshes when needed
                     CredentialModel cred = oidcProvider.getCredentials();
                     long expirationSeconds = 0;
                     if (cred.getExpiration() > 0) {
                       expirationSeconds =
                           (cred.getExpiration() - System.currentTimeMillis()) / 1000;
                     }
-                    this.currentCredentials =
-                        new BasicCredentials(
-                            cred.getAccessKeyId(),
-                            cred.getAccessKeySecret(),
-                            cred.getSecurityToken(),
-                            expirationSeconds);
-                    return this.currentCredentials;
+                    return new BasicCredentials(
+                        cred.getAccessKeyId(),
+                        cred.getAccessKeySecret(),
+                        cred.getSecurityToken(),
+                        expirationSeconds);
                   } catch (Exception e) {
                     throw new RuntimeException("Failed to get RRSA credentials", e);
                   }
