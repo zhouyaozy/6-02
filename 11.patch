@@ -1,0 +1,99 @@
+diff --git a/core/src/main/java/org/apache/iceberg/ConfigManager.java b/core/src/main/java/org/apache/iceberg/ConfigManager.java
+new file mode 100644
+index 000000000..4d0a00088
+--- /dev/null
++++ b/core/src/main/java/org/apache/iceberg/ConfigManager.java
+@@ -0,0 +1,93 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.iceberg;
++
++import java.io.Serializable;
++import java.util.Map;
++import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
++import org.apache.iceberg.util.PropertyUtil;
++
++/**
++ * A generic configuration manager that handles properties with default values and type-safe
++ * access.
++ */
++public class ConfigManager implements Serializable {
++
++  public static final String ROOT_DIR = "root-dir";
++  public static final String ROOT_DIR_DEFAULT = "/tmp";
++
++  public static final String SERVER_PORT = "server.port";
++  public static final int SERVER_PORT_DEFAULT = 9393;
++
++  public static final String ENABLED = "enabled";
++  public static final boolean ENABLED_DEFAULT = true;
++
++  public static final String TIMEOUT_MS = "timeout-ms";
++  public static final long TIMEOUT_MS_DEFAULT = 30000L;
++
++  private final Map<String, String> properties;
++
++  public ConfigManager() {
++    this(ImmutableMap.of());
++  }
++
++  public ConfigManager(Map<String, String> properties) {
++    this.properties = ImmutableMap.copyOf(properties);
++  }
++
++  public String rootDir() {
++    return PropertyUtil.propertyAsString(properties, ROOT_DIR, ROOT_DIR_DEFAULT);
++  }
++
++  public int serverPort() {
++    return PropertyUtil.propertyAsInt(properties, SERVER_PORT, SERVER_PORT_DEFAULT);
++  }
++
++  public boolean enabled() {
++    return PropertyUtil.propertyAsBoolean(properties, ENABLED, ENABLED_DEFAULT);
++  }
++
++  public long timeoutMs() {
++    return PropertyUtil.propertyAsLong(properties, TIMEOUT_MS, TIMEOUT_MS_DEFAULT);
++  }
++
++  public String get(String property) {
++    return properties.get(property);
++  }
++
++  public String getOrDefault(String property, String defaultValue) {
++    return properties.getOrDefault(property, defaultValue);
++  }
++
++  public int getAsInt(String property, int defaultValue) {
++    return PropertyUtil.propertyAsInt(properties, property, defaultValue);
++  }
++
++  public long getAsLong(String property, long defaultValue) {
++    return PropertyUtil.propertyAsLong(properties, property, defaultValue);
++  }
++
++  public boolean getAsBoolean(String property, boolean defaultValue) {
++    return PropertyUtil.propertyAsBoolean(properties, property, defaultValue);
++  }
++
++  public Map<String, String> getPropertiesWithPrefix(String prefix) {
++    return PropertyUtil.propertiesWithPrefix(properties, prefix);
++  }
++}
