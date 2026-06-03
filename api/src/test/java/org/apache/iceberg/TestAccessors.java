@@ -129,15 +129,35 @@ public class TestAccessors {
     return schema.accessorForField(17);
   }
 
+  private void assertAccessorMetadata(Accessor<StructLike> accessor, Type type) {
+    assertThat(accessor.type()).isEqualTo(type);
+    assertThat(accessor.javaClass()).isEqualTo(type.typeId().javaClass());
+  }
+
   private void assertAccessorReturns(Type type, Object value) {
-    assertThat(direct(type).get(Row.of(value))).isEqualTo(value);
+    Accessor<StructLike> directAccessor = direct(type);
+    assertAccessorMetadata(directAccessor, type);
+    assertThat(directAccessor.get(Row.of(value))).isEqualTo(value);
 
-    assertThat(nested1(type).get(Row.of(Row.of(value)))).isEqualTo(value);
-    assertThat(nested2(type).get(Row.of(Row.of(Row.of(value))))).isEqualTo(value);
-    assertThat(nested3(type).get(Row.of(Row.of(Row.of(Row.of(value)))))).isEqualTo(value);
-    assertThat(nested4(type).get(Row.of(Row.of(Row.of(Row.of(Row.of(value))))))).isEqualTo(value);
+    Accessor<StructLike> nested1Accessor = nested1(type);
+    assertAccessorMetadata(nested1Accessor, type);
+    assertThat(nested1Accessor.get(Row.of(Row.of(value)))).isEqualTo(value);
 
-    assertThat(nested3optional(type).get(Row.of(Row.of(Row.of(Row.of(value)))))).isEqualTo(value);
+    Accessor<StructLike> nested2Accessor = nested2(type);
+    assertAccessorMetadata(nested2Accessor, type);
+    assertThat(nested2Accessor.get(Row.of(Row.of(Row.of(value))))).isEqualTo(value);
+
+    Accessor<StructLike> nested3Accessor = nested3(type);
+    assertAccessorMetadata(nested3Accessor, type);
+    assertThat(nested3Accessor.get(Row.of(Row.of(Row.of(Row.of(value)))))).isEqualTo(value);
+
+    Accessor<StructLike> nested4Accessor = nested4(type);
+    assertAccessorMetadata(nested4Accessor, type);
+    assertThat(nested4Accessor.get(Row.of(Row.of(Row.of(Row.of(Row.of(value))))))).isEqualTo(value);
+
+    Accessor<StructLike> optionalAccessor = nested3optional(type);
+    assertAccessorMetadata(optionalAccessor, type);
+    assertThat(optionalAccessor.get(Row.of(Row.of(Row.of(Row.of(value)))))).isEqualTo(value);
   }
 
   @Test

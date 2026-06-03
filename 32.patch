@@ -1,0 +1,62 @@
+diff --git a/32.patch b/32.patch
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/api/src/main/java/org/apache/iceberg/Accessor.java b/api/src/main/java/org/apache/iceberg/Accessor.java
+index 2a20a04df..194d82cb2 100644
+--- a/api/src/main/java/org/apache/iceberg/Accessor.java
++++ b/api/src/main/java/org/apache/iceberg/Accessor.java
+@@ -25,4 +25,8 @@ public interface Accessor<T> extends Serializable {
+   Object get(T container);
+ 
+   Type type();
++
++  default Class<?> javaClass() {
++    return type().typeId().javaClass();
++  }
+ }
+diff --git a/api/src/test/java/org/apache/iceberg/TestAccessors.java b/api/src/test/java/org/apache/iceberg/TestAccessors.java
+index 7b4feb845..6154ed398 100644
+--- a/api/src/test/java/org/apache/iceberg/TestAccessors.java
++++ b/api/src/test/java/org/apache/iceberg/TestAccessors.java
+@@ -129,15 +129,35 @@ public class TestAccessors {
+     return schema.accessorForField(17);
+   }
+ 
++  private void assertAccessorMetadata(Accessor<StructLike> accessor, Type type) {
++    assertThat(accessor.type()).isEqualTo(type);
++    assertThat(accessor.javaClass()).isEqualTo(type.typeId().javaClass());
++  }
++
+   private void assertAccessorReturns(Type type, Object value) {
+-    assertThat(direct(type).get(Row.of(value))).isEqualTo(value);
++    Accessor<StructLike> directAccessor = direct(type);
++    assertAccessorMetadata(directAccessor, type);
++    assertThat(directAccessor.get(Row.of(value))).isEqualTo(value);
++
++    Accessor<StructLike> nested1Accessor = nested1(type);
++    assertAccessorMetadata(nested1Accessor, type);
++    assertThat(nested1Accessor.get(Row.of(Row.of(value)))).isEqualTo(value);
++
++    Accessor<StructLike> nested2Accessor = nested2(type);
++    assertAccessorMetadata(nested2Accessor, type);
++    assertThat(nested2Accessor.get(Row.of(Row.of(Row.of(value))))).isEqualTo(value);
++
++    Accessor<StructLike> nested3Accessor = nested3(type);
++    assertAccessorMetadata(nested3Accessor, type);
++    assertThat(nested3Accessor.get(Row.of(Row.of(Row.of(Row.of(value)))))).isEqualTo(value);
+ 
+-    assertThat(nested1(type).get(Row.of(Row.of(value)))).isEqualTo(value);
+-    assertThat(nested2(type).get(Row.of(Row.of(Row.of(value))))).isEqualTo(value);
+-    assertThat(nested3(type).get(Row.of(Row.of(Row.of(Row.of(value)))))).isEqualTo(value);
+-    assertThat(nested4(type).get(Row.of(Row.of(Row.of(Row.of(Row.of(value))))))).isEqualTo(value);
++    Accessor<StructLike> nested4Accessor = nested4(type);
++    assertAccessorMetadata(nested4Accessor, type);
++    assertThat(nested4Accessor.get(Row.of(Row.of(Row.of(Row.of(Row.of(value))))))).isEqualTo(value);
+ 
+-    assertThat(nested3optional(type).get(Row.of(Row.of(Row.of(Row.of(value)))))).isEqualTo(value);
++    Accessor<StructLike> optionalAccessor = nested3optional(type);
++    assertAccessorMetadata(optionalAccessor, type);
++    assertThat(optionalAccessor.get(Row.of(Row.of(Row.of(Row.of(value)))))).isEqualTo(value);
+   }
+ 
+   @Test

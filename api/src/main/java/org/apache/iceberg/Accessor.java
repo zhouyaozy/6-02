@@ -25,4 +25,8 @@ public interface Accessor<T> extends Serializable {
   Object get(T container);
 
   Type type();
+
+  default Class<?> javaClass() {
+    return type().typeId().javaClass();
+  }
 }
