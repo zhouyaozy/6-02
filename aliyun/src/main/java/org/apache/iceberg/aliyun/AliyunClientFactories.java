@@ -90,6 +90,9 @@ public class AliyunClientFactories {
   static class DefaultAliyunClientFactory implements AliyunClientFactory {
     private static final Logger LOG = LoggerFactory.getLogger(DefaultAliyunClientFactory.class);
     private AliyunProperties aliyunProperties;
+    private transient volatile Boolean rrsaEnvironmentAvailable;
+    private transient volatile OIDCRoleArnCredentialProvider oidcProvider;
+    private transient volatile boolean rrsaInitialized = false;
 
     DefaultAliyunClientFactory() {}
 
@@ -103,12 +106,31 @@ public class AliyunClientFactories {
      * https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/use-rrsa-to-authorize-pods-to-access-different-cloud-services
      */
     boolean isRrsaEnvironmentAvailable() {
-      String oidcProviderArn = System.getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
-      String roleArn = System.getenv("ALIBABA_CLOUD_ROLE_ARN");
-      String oidcTokenFile = System.getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
-      return !Strings.isNullOrEmpty(oidcProviderArn)
-          && !Strings.isNullOrEmpty(roleArn)
-          && !Strings.isNullOrEmpty(oidcTokenFile);
+      if (rrsaEnvironmentAvailable == null) {
+        synchronized (this) {
+          if (rrsaEnvironmentAvailable == null) {
+            String oidcProviderArn = System.getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
+            String roleArn = System.getenv("ALIBABA_CLOUD_ROLE_ARN");
+            String oidcTokenFile = System.getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+            rrsaEnvironmentAvailable =
+                !Strings.isNullOrEmpty(oidcProviderArn)
+                    && !Strings.isNullOrEmpty(roleArn)
+                    && !Strings.isNullOrEmpty(oidcTokenFile);
+          }
+        }
+      }
+      return rrsaEnvironmentAvailable;
+    }
+
+    private OIDCRoleArnCredentialProvider oidcProvider() {
+      if (oidcProvider == null) {
+        synchronized (this) {
+          if (oidcProvider == null) {
+            oidcProvider = OIDCRoleArnCredentialProvider.builder().build();
+          }
+        }
+      }
+      return oidcProvider;
     }
 
     @Override
@@ -122,13 +144,19 @@ public class AliyunClientFactories {
       // Check if RRSA environment is available
       if (isRrsaEnvironmentAvailable()) {
         try {
-          LOG.info(
-              "Detected RRSA environment variables, creating OSS client with RRSA credentials for endpoint: {}",
-              endpoint);
+          if (!rrsaInitialized) {
+            synchronized (this) {
+              if (!rrsaInitialized) {
+                LOG.info(
+                    "Detected RRSA environment variables, creating OSS client with RRSA credentials for endpoint: {}",
+                    endpoint);
+                rrsaInitialized = true;
+              }
+            }
+          }
 
-          // Use OIDCRoleArnCredentialProvider directly with built-in caching and auto-refresh
-          final OIDCRoleArnCredentialProvider oidcProvider =
-              OIDCRoleArnCredentialProvider.builder().build();
+          // Use cached OIDCRoleArnCredentialProvider with built-in caching and auto-refresh
+          final OIDCRoleArnCredentialProvider provider = oidcProvider();
 
           CredentialsProvider ossCredProvider =
               new CredentialsProvider() {
@@ -142,7 +170,7 @@ public class AliyunClientFactories {
                   try {
                     LOG.debug("Getting credentials using RRSA");
                     // getCredentials() returns cached credentials and auto-refreshes when needed
-                    CredentialModel cred = oidcProvider.getCredentials();
+                    CredentialModel cred = provider.getCredentials();
                     long expirationSeconds = 0;
                     if (cred.getExpiration() > 0) {
                       expirationSeconds =
