@@ -20,8 +20,8 @@ package org.apache.iceberg.rest.responses;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import javax.annotation.Nullable;
+import org.apache.iceberg.ConfigManager;
 import org.apache.iceberg.relocated.com.google.common.base.MoreObjects;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
@@ -52,7 +52,6 @@ public class ConfigResponse implements RESTResponse {
   private Map<String, String> defaults;
   private Map<String, String> overrides;
   private List<Endpoint> endpoints;
-  // Optional ISO-8601 duration string indicating server support for idempotency keys
   private String idempotencyKeyLifetime;
 
   public ConfigResponse() {
@@ -74,67 +73,28 @@ public class ConfigResponse implements RESTResponse {
   @Override
   public void validate() {}
 
-  /**
-   * Properties that should be used as default configuration. {@code defaults} have the lowest
-   * priority and should be applied before the client provided configuration.
-   *
-   * @return properties that should be used as default configuration
-   */
   public Map<String, String> defaults() {
     return defaults != null ? defaults : ImmutableMap.of();
   }
 
-  /**
-   * Properties that should be used to override client configuration. {@code overrides} have the
-   * highest priority and should be applied after defaults and any client-provided configuration
-   * properties.
-   *
-   * @return properties that should be given higher precedence than any client provided input
-   */
   public Map<String, String> overrides() {
     return overrides != null ? overrides : ImmutableMap.of();
   }
 
-  /**
-   * The list of available endpoints that the server supports
-   *
-   * @return A list of available endpoints that the server supports
-   */
   public List<Endpoint> endpoints() {
     return null != endpoints ? endpoints : ImmutableList.of();
   }
 
-  /**
-   * Optional server-advertised reuse window for idempotency keys. Presence indicates that the
-   * server supports Idempotency-Key semantics on mutation endpoints.
-   *
-   * @return ISO-8601 duration string (e.g., PT30M) or null if not supported/advertised
-   */
   @Nullable
   public String idempotencyKeyLifetime() {
     return idempotencyKeyLifetime;
   }
 
-  /**
-   * Merge client-provided config with server side provided configuration to return a single
-   * properties map which will be used for instantiating and configuring the REST catalog.
-   *
-   * @param clientProperties - Client provided configuration
-   * @return Merged configuration, with precedence in the order overrides, then client properties,
-   *     and then defaults.
-   */
   public Map<String, String> merge(Map<String, String> clientProperties) {
     Preconditions.checkNotNull(
         clientProperties,
         "Cannot merge client properties with server-provided properties. Invalid client configuration: null");
-    Map<String, String> merged = defaults != null ? Maps.newHashMap(defaults) : Maps.newHashMap();
-    merged.putAll(clientProperties);
-
-    if (overrides != null) {
-      merged.putAll(overrides);
-    }
-
-    return ImmutableMap.copyOf(Maps.filterValues(merged, Objects::nonNull));
+    return ConfigManager.from(defaults(), overrides()).merge(clientProperties);
   }
 
   @Override
@@ -176,7 +136,6 @@ public class ConfigResponse implements RESTResponse {
       return this;
     }
 
-    /** Adds the passed in map entries to the existing `defaults` of this Builder. */
     public Builder withDefaults(Map<String, String> defaultsToAdd) {
       Preconditions.checkNotNull(defaultsToAdd, "Invalid default properties map: null");
       Preconditions.checkArgument(
@@ -185,7 +144,6 @@ public class ConfigResponse implements RESTResponse {
       return this;
     }
 
-    /** Adds the passed in map entries to the existing `overrides` of this Builder. */
     public Builder withOverrides(Map<String, String> overridesToAdd) {
       Preconditions.checkNotNull(overridesToAdd, "Invalid override properties map: null");
       Preconditions.checkArgument(
@@ -199,7 +157,6 @@ public class ConfigResponse implements RESTResponse {
       return this;
     }
 
-    /** Sets the optional idempotency key lifetime advertised by the server. */
     public Builder withIdempotencyKeyLifetime(String lifetime) {
       this.idempotencyKeyLifetime = lifetime;
       return this;
